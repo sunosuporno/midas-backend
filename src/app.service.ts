@@ -40,6 +40,8 @@ export class AppService {
         throw new HttpException('Invalid expiresAt timestamp', 400);
       }
 
+      console.log('chain:', createDelegatedKeyDto.chain);
+
       // Step 1: Create initial delegated key
       console.log('Step 1: Registering delegated key');
       const initialResponse = await axios.post(
@@ -72,58 +74,6 @@ export class AppService {
         signer: chainAuth.approvals.pending[0].signer,
         authorizationId: chainAuth.id,
       };
-
-      // // Step 2: Create signature
-      // console.log('Step 2: Creating signature');
-      // const signatureResponse = await axios.post<{
-      //   id: string;
-      //   approvals: {
-      //     pending: Array<{ message: string }>;
-      //   };
-      // }>(
-      //   `https://www.crossmint.com/api/2022-06-09/wallets/${walletLocator}/signatures`,
-      //   {
-      //     params: {
-      //       chain: createDelegatedKeyDto.chain,
-      //       message: chainAuth.approvals.pending[0].message,
-      //     },
-      //     type: 'evm-message',
-      //   },
-      //   {
-      //     headers: {
-      //       'X-API-KEY': apiKey,
-      //       'Content-Type': 'application/json',
-      //     },
-      //   },
-      // );
-      // console.log(
-      //   'Signature Response:',
-      //   JSON.stringify(signatureResponse.data, null, 2),
-      // );
-
-      // // Step 3: Submit approval
-      // console.log('Step 3: Submitting approval');
-      // const approvalResponse = await axios.post(
-      //   `https://www.crossmint.com/api/2022-06-09/wallets/${walletLocator}/signatures/${signatureResponse.data.id}/approvals`,
-      //   {
-      //     approvals: [
-      //       {
-      //         signer: walletLocator,
-      //         signature: signatureResponse.data.approvals.pending[0].message,
-      //       },
-      //     ],
-      //   },
-      //   {
-      //     headers: {
-      //       'X-API-KEY': apiKey,
-      //       'Content-Type': 'application/json',
-      //     },
-      //   },
-      // );
-      // console.log(
-      //   'Approval Response:',
-      //   JSON.stringify(approvalResponse.data, null, 2),
-      // );
     } catch (error) {
       console.error('=== Error in createDelegatedKey ===');
       console.error(
@@ -289,7 +239,7 @@ export class AppService {
           chain: 'mode',
           provider: alchemyApiKey,
         }),
-        plugins: [erc20({ tokens: [USDC] })],
+        plugins: [sendETH(), erc20({ tokens: [USDC] })],
       });
 
       const result = await generateText({
@@ -306,6 +256,48 @@ export class AppService {
       console.error('Error in callAgent:', error);
       throw new HttpException(
         error.message || 'Failed to process agent request',
+        error.response?.status || 500,
+      );
+    }
+  }
+
+  async checkDelegated(walletAddress: string) {
+    try {
+      const apiKey = this.configService.get<string>('CROSSMINT_SERVER_API_KEY');
+      const signerWallet = this.configService.get<string>('SIGNER_WALLET');
+
+      try {
+        const response = await axios.get(
+          `https://www.crossmint.com/api/2022-06-09/wallets/${walletAddress}/signers/${signerWallet}`,
+          {
+            headers: {
+              'x-api-key': apiKey,
+            },
+          },
+        );
+
+        return response.data;
+      } catch (error) {
+        if (error.response?.status === 404) {
+          // Extract the address from the SIGNER_WALLET env variable
+          // Format is typically "evm-keypair:0x..."
+          const [type, address] = signerWallet.split(':');
+
+          // Return a standardized response for non-delegated cases
+          return {
+            type: type,
+            address: address,
+            locator: signerWallet,
+            expiresAt: '0',
+            chains: {},
+          };
+        }
+        throw error; // Re-throw if it's not a 404 error
+      }
+    } catch (error) {
+      console.error('Error in checkDelegated:', error);
+      throw new HttpException(
+        error.response?.data?.message || 'Failed to check delegation',
         error.response?.status || 500,
       );
     }

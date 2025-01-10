@@ -1,4 +1,11 @@
-import { Controller, Get, Post, Body, Param } from '@nestjs/common';
+import {
+  Controller,
+  Get,
+  Post,
+  Body,
+  Param,
+  HttpException,
+} from '@nestjs/common';
 import { AppService } from './app.service';
 import { CreateDelegatedKeyDto } from './dto/create-delegated-key.dto';
 import { CreateWalletDto } from './dto/create-wallet.dto';
@@ -14,32 +21,57 @@ export class AppController {
     return this.appService.getHello();
   }
 
+  @Get('check-delegated/:walletaddress')
+  async checkDelegated(@Param('walletaddress') walletAddress: string) {
+    try {
+      return await this.appService.checkDelegated(walletAddress);
+    } catch (error) {
+      throw new HttpException(error.message, error.status || 500);
+    }
+  }
+
   @Post('wallets/:walletLocator/delegated-key')
-  createDelegatedKey(
+  async createDelegatedKey(
     @Param('walletLocator') walletLocator: string,
     @Body() createDelegatedKeyDto: CreateDelegatedKeyDto,
   ) {
-    return this.appService.approveDelegatedKey(
-      walletLocator,
-      createDelegatedKeyDto,
-    );
+    try {
+      return await this.appService.approveDelegatedKey(
+        walletLocator,
+        createDelegatedKeyDto,
+      );
+    } catch (error) {
+      throw new HttpException(error.message, error.status || 500);
+    }
   }
 
   @Post('wallet/create')
-  createWallet(@Body() createWalletDto: CreateWalletDto) {
-    return this.appService.createWallet(createWalletDto);
+  async createWallet(@Body() createWalletDto: CreateWalletDto) {
+    try {
+      return await this.appService.createWallet(createWalletDto);
+    } catch (error) {
+      throw new HttpException(error.message, error.status || 500);
+    }
   }
 
   @Post('approve-delegate')
-  approveDelegate(@Body() approveDelegateDto: ApproveDelegateDto) {
-    return this.appService.approveDelegate(approveDelegateDto);
+  async approveDelegate(@Body() approveDelegateDto: ApproveDelegateDto) {
+    try {
+      return await this.appService.approveDelegate(approveDelegateDto);
+    } catch (error) {
+      throw new HttpException(error.message, error.status || 500);
+    }
   }
 
   @Post('call/agent')
   async callAgent(@Body() agentCallDto: AgentCallDto) {
-    return this.appService.callAgent(
-      agentCallDto.prompt,
-      agentCallDto.walletAddress,
-    );
+    try {
+      return await this.appService.callAgent(
+        agentCallDto.prompt,
+        agentCallDto.walletAddress,
+      );
+    } catch (error) {
+      throw new HttpException(error.message, error.status || 500);
+    }
   }
 }
