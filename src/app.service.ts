@@ -26,7 +26,7 @@ export class AppService {
     return 'Hello World!';
   }
 
-  async approveDelegatedKey(
+  async createDelegatedKey(
     walletLocator: string,
     createDelegatedKeyDto: CreateDelegatedKeyDto,
   ) {
@@ -35,22 +35,29 @@ export class AppService {
       const apiKey = this.configService.get<string>('CROSSMINT_SERVER_API_KEY');
       const signerWallet = this.configService.get<string>('SIGNER_WALLET');
 
-      const expiresAt = Number(createDelegatedKeyDto.expiresAt);
-      if (isNaN(expiresAt)) {
+      const expiresAt = createDelegatedKeyDto.expiresAt
+        ? Number(createDelegatedKeyDto.expiresAt)
+        : undefined;
+
+      if (createDelegatedKeyDto.expiresAt && isNaN(expiresAt)) {
         throw new HttpException('Invalid expiresAt timestamp', 400);
       }
 
       console.log('chain:', createDelegatedKeyDto.chain);
 
+      const body = {
+        chain: createDelegatedKeyDto.chain,
+        expiresAt: expiresAt,
+        signer: signerWallet,
+      };
+
+      console.log('body:', body);
+
       // Step 1: Create initial delegated key
       console.log('Step 1: Registering delegated key');
       const initialResponse = await axios.post(
         `https://www.crossmint.com/api/2022-06-09/wallets/${walletLocator}/signers`,
-        {
-          chain: createDelegatedKeyDto.chain,
-          expiresAt: expiresAt,
-          signer: signerWallet,
-        },
+        body,
         {
           headers: {
             'x-api-key': apiKey,
@@ -69,11 +76,16 @@ export class AppService {
         throw new HttpException('No pending approval found', 400);
       }
 
-      return {
+      const result = {
         messageToSign: chainAuth.approvals.pending[0].message,
         signer: chainAuth.approvals.pending[0].signer,
         authorizationId: chainAuth.id,
       };
+      console.log(
+        '=== Response to Frontend ===\n',
+        JSON.stringify(result, null, 2),
+      );
+      return result;
     } catch (error) {
       console.error('=== Error in createDelegatedKey ===');
       console.error(
@@ -95,54 +107,54 @@ export class AppService {
     }
   }
 
-  async createWallet(
-    createWalletDto: CreateWalletDto,
-  ): Promise<WalletResponse> {
-    try {
-      console.log('Creating wallet with DTO:', createWalletDto);
+  // async createWallet(
+  //   createWalletDto: CreateWalletDto,
+  // ): Promise<WalletResponse> {
+  //   try {
+  //     console.log('Creating wallet with DTO:', createWalletDto);
 
-      const apiKey = this.configService.get<string>('CROSSMINT_SERVER_API_KEY');
-      console.log('Using API key:', apiKey?.substring(0, 10) + '...');
+  //     const apiKey = this.configService.get<string>('CROSSMINT_SERVER_API_KEY');
+  //     console.log('Using API key:', apiKey?.substring(0, 10) + '...');
 
-      const { email, signerAddress } = createWalletDto;
+  //     const { email, signerAddress } = createWalletDto;
 
-      const requestBody = {
-        type: 'evm-smart-wallet',
-        config: {
-          adminSigner: {
-            type: 'evm-keypair',
-            address: signerAddress,
-          },
-        },
-        linkedUser: `email:${email}`,
-      };
-      console.log('Request body:', requestBody);
+  //     const requestBody = {
+  //       type: 'evm-smart-wallet',
+  //       config: {
+  //         adminSigner: {
+  //           type: 'evm-keypair',
+  //           address: signerAddress,
+  //         },
+  //       },
+  //       linkedUser: `email:${email}`,
+  //     };
+  //     console.log('Request body:', requestBody);
 
-      const response = await axios.post<WalletResponse>(
-        'https://www.crossmint.com/api/2022-06-09/wallets',
-        requestBody,
-        {
-          headers: {
-            'X-API-KEY': apiKey,
-            'x-idempotency-key': email,
-            'Content-Type': 'application/json',
-          },
-        },
-      );
+  //     const response = await axios.post<WalletResponse>(
+  //       'https://www.crossmint.com/api/2022-06-09/wallets',
+  //       requestBody,
+  //       {
+  //         headers: {
+  //           'X-API-KEY': apiKey,
+  //           'x-idempotency-key': email,
+  //           'Content-Type': 'application/json',
+  //         },
+  //       },
+  //     );
 
-      console.log('Crossmint API Response:', response.data);
-      return response.data;
-    } catch (error) {
-      console.error(
-        'Error in createWallet:',
-        error.response?.data || error.message,
-      );
-      throw new HttpException(
-        error.response?.data?.message || 'Failed to create wallet',
-        error.response?.status || 500,
-      );
-    }
-  }
+  //     console.log('Crossmint API Response:', response.data);
+  //     return response.data;
+  //   } catch (error) {
+  //     console.error(
+  //       'Error in createWallet:',
+  //       error.response?.data || error.message,
+  //     );
+  //     throw new HttpException(
+  //       error.response?.data?.message || 'Failed to create wallet',
+  //       error.response?.status || 500,
+  //     );
+  //   }
+  // }
 
   async approveDelegate(approveDelegateDto: ApproveDelegateDto) {
     try {
@@ -236,14 +248,14 @@ export class AppService {
           signer: {
             secretKey: walletSignerSecretKey as `0x${string}`,
           },
-          chain: 'mode',
+          chain: 'base',
           provider: alchemyApiKey,
         }),
         plugins: [sendETH(), erc20({ tokens: [USDC] })],
       });
 
       const result = await generateText({
-        model: openai('gpt-4'),
+        model: openai('gpt-4o'),
         tools: tools,
         maxSteps: 12,
         prompt: prompt,

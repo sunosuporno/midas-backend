@@ -8,7 +8,7 @@ import {
 } from '@nestjs/common';
 import { AppService } from './app.service';
 import { CreateDelegatedKeyDto } from './dto/create-delegated-key.dto';
-import { CreateWalletDto } from './dto/create-wallet.dto';
+// import { CreateWalletDto } from './dto/create-wallet.dto';
 import { ApproveDelegateDto } from './dto/approve-delegate.dto';
 import { AgentCallDto } from './dto/agent-call.dto';
 
@@ -36,7 +36,7 @@ export class AppController {
     @Body() createDelegatedKeyDto: CreateDelegatedKeyDto,
   ) {
     try {
-      return await this.appService.approveDelegatedKey(
+      return await this.appService.createDelegatedKey(
         walletLocator,
         createDelegatedKeyDto,
       );
@@ -45,14 +45,14 @@ export class AppController {
     }
   }
 
-  @Post('wallet/create')
-  async createWallet(@Body() createWalletDto: CreateWalletDto) {
-    try {
-      return await this.appService.createWallet(createWalletDto);
-    } catch (error) {
-      throw new HttpException(error.message, error.status || 500);
-    }
-  }
+  // @Post('wallet/create')
+  // async createWallet(@Body() createWalletDto: CreateWalletDto) {
+  //   try {
+  //     return await this.appService.createWallet(createWalletDto);
+  //   } catch (error) {
+  //     throw new HttpException(error.message, error.status || 500);
+  //   }
+  // }
 
   @Post('approve-delegate')
   async approveDelegate(@Body() approveDelegateDto: ApproveDelegateDto) {
