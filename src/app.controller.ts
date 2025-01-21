@@ -69,6 +69,7 @@ export class AppController {
       return await this.appService.callAgent(
         agentCallDto.prompt,
         agentCallDto.walletAddress,
+        agentCallDto.chain,
       );
     } catch (error) {
       throw new HttpException(error.message, error.status || 500);
