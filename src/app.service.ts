@@ -184,6 +184,29 @@ export class AppService {
     return { sessionId };
   }
 
+  async saveUserMessage(
+    walletAddress: string,
+    sessionId: string,
+    message: {
+      content: string;
+      chain: ChainType;
+    },
+  ) {
+    return this.chatModel.findOneAndUpdate(
+      { walletAddress, sessionId },
+      {
+        $push: {
+          messages: {
+            role: 'user',
+            content: message.content,
+            chain: message.chain,
+            timestamp: new Date(),
+          },
+        },
+      },
+    );
+  }
+
   async getChatSessions(walletAddress: string) {
     return this.chatModel
       .find({ walletAddress })
@@ -247,25 +270,16 @@ export class AppService {
           { walletAddress, sessionId },
           {
             $push: {
-              messages: [
-                {
-                  role: 'user',
-                  content: prompt,
-                  chain,
-                  timestamp: new Date(),
-                },
-                {
-                  role: 'assistant',
-                  content: result.text,
-                  chain,
-                  timestamp: new Date(),
-                },
-              ],
+              messages: {
+                role: 'assistant',
+                content: result.text,
+                chain,
+                timestamp: new Date(),
+              },
             },
           },
         );
       }
-
       return {
         response: result.text,
       };
