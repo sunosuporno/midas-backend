@@ -23,7 +23,7 @@ export class AppService {
   ) {}
 
   getHello(): string {
-    return 'Hello World!';
+    return 'gm world!';
   }
 
   async createDelegatedKey(
