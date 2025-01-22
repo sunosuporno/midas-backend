@@ -10,10 +10,17 @@ import { USDC, USDT, erc20 } from '../workspace/goat-sdk/plugins/erc20/src';
 import { sendETH } from '@goat-sdk/wallet-evm';
 import { openai } from '@ai-sdk/openai';
 import { ChainType } from './dto/agent-call.dto';
+import { Model } from 'mongoose';
+import { InjectModel } from '@nestjs/mongoose';
+import { Chat } from './schemas/chat.schema';
+import { v4 as uuidv4 } from 'uuid';
 
 @Injectable()
 export class AppService {
-  constructor(private configService: ConfigService) {}
+  constructor(
+    @InjectModel(Chat.name) private chatModel: Model<Chat>,
+    private configService: ConfigService,
+  ) {}
 
   getHello(): string {
     return 'Hello World!';
@@ -165,12 +172,37 @@ export class AppService {
     }
   }
 
+  async createChatSession(walletAddress: string) {
+    console.log('=== Creating Chat Session ===');
+    const sessionId = uuidv4();
+    const chat = new this.chatModel({
+      walletAddress,
+      sessionId,
+      messages: [],
+    });
+    await chat.save();
+    return { sessionId };
+  }
+
+  async getChatSessions(walletAddress: string) {
+    return this.chatModel
+      .find({ walletAddress })
+      .select('sessionId createdAt')
+      .sort({ createdAt: -1 });
+  }
+
+  async getChatHistory(walletAddress: string, sessionId: string) {
+    return this.chatModel.findOne({ walletAddress, sessionId });
+  }
+
   async callAgent(
     prompt: string,
     walletAddress: string,
-    chain: ChainType = 'base',
+    chain: ChainType,
+    sessionId?: string,
   ) {
     try {
+      console.log('=== Calling Agent ===');
       const apiKey = this.configService.get<string>('CROSSMINT_SERVER_API_KEY');
       const walletSignerSecretKey = this.configService.get<string>(
         'WALLET_SIGNER_SECRET_KEY',
@@ -208,6 +240,31 @@ export class AppService {
         maxSteps: 12,
         prompt: prompt,
       });
+
+      // Save the conversation
+      if (sessionId) {
+        await this.chatModel.findOneAndUpdate(
+          { walletAddress, sessionId },
+          {
+            $push: {
+              messages: [
+                {
+                  role: 'user',
+                  content: prompt,
+                  chain,
+                  timestamp: new Date(),
+                },
+                {
+                  role: 'assistant',
+                  content: result.text,
+                  chain,
+                  timestamp: new Date(),
+                },
+              ],
+            },
+          },
+        );
+      }
 
       return {
         response: result.text,

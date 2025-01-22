@@ -63,6 +63,38 @@ export class AppController {
     }
   }
 
+  @Post('chat/session')
+  async createChatSession(
+    @Body() body: { walletAddress: string; chain: string },
+  ) {
+    try {
+      return await this.appService.createChatSession(body.walletAddress);
+    } catch (error) {
+      throw new HttpException(error.message, error.status || 500);
+    }
+  }
+
+  @Get('chat/sessions/:walletAddress')
+  async getChatSessions(@Param('walletAddress') walletAddress: string) {
+    try {
+      return await this.appService.getChatSessions(walletAddress);
+    } catch (error) {
+      throw new HttpException(error.message, error.status || 500);
+    }
+  }
+
+  @Get('chat/:walletAddress/:sessionId')
+  async getChatHistory(
+    @Param('walletAddress') walletAddress: string,
+    @Param('sessionId') sessionId: string,
+  ) {
+    try {
+      return await this.appService.getChatHistory(walletAddress, sessionId);
+    } catch (error) {
+      throw new HttpException(error.message, error.status || 500);
+    }
+  }
+
   @Post('call/agent')
   async callAgent(@Body() agentCallDto: AgentCallDto) {
     try {
@@ -70,6 +102,7 @@ export class AppController {
         agentCallDto.prompt,
         agentCallDto.walletAddress,
         agentCallDto.chain,
+        agentCallDto.sessionId,
       );
     } catch (error) {
       throw new HttpException(error.message, error.status || 500);

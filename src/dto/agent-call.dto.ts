@@ -14,4 +14,5 @@ export class AgentCallDto {
   prompt: string;
   walletAddress: string;
   chain: ChainType;
+  sessionId?: string;
 }
