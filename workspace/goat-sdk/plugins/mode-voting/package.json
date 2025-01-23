@@ -1,5 +1,5 @@
 {
-  "name": "@goat-sdk/erc20",
+  "name": "@goat-sdk/mode-voting",
   "version": "1.0.0",
   "files": [
     "dist/**/*",
