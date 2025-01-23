@@ -1,0 +1,23 @@
+{
+  "name": "@goat-sdk/plugin-kim",
+  "version": "0.1.7",
+  "files": [
+    "dist/**/*",
+    "README.md",
+    "package.json"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "clean": "rm -rf dist",
+    "test": "vitest run --passWithNoTests"
+  },
+  "sideEffects": false,
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "peerDependencies": {
+    "@goat-sdk/core": "^0.4.5",
+    "@goat-sdk/wallet-evm": "^0.2.5",
+    "viem": "^2.22.3",
+    "zod": "^3.23.8"
+  }
+}
