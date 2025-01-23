@@ -7,6 +7,7 @@ import { generateText } from 'ai';
 import { getOnChainTools } from '@goat-sdk/adapter-vercel-ai';
 import { crossmint } from '@goat-sdk/crossmint';
 import { USDC, USDT, erc20 } from '../workspace/goat-sdk/plugins/erc20/src';
+import { modeVoting } from '../workspace/goat-sdk/plugins/mode-voting/src';
 import { sendETH } from '@goat-sdk/wallet-evm';
 import { openai } from '@ai-sdk/openai';
 import { ChainType } from './dto/agent-call.dto';
@@ -254,7 +255,7 @@ export class AppService {
           chain,
           provider: alchemyApiKey,
         }),
-        plugins: [sendETH(), erc20({ tokens: [USDC, USDT] })],
+        plugins: [sendETH(), erc20({ tokens: [USDC, USDT] }), modeVoting()],
       });
 
       const result = await generateText({
