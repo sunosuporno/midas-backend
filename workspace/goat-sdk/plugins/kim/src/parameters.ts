@@ -26,7 +26,10 @@ export class ExactInputParams extends createToolParameters(
     amountIn: z.string().describe('The amount of tokens to swap in base units'),
     amountOutMinimum: z
       .string()
-      .describe('The minimum amount of tokens to receive in base units'),
+      .default('0')
+      .describe(
+        'The minimum amount of tokens to receive in base units, send 0 unless specified',
+      ),
   }),
 ) {}
 
@@ -115,27 +118,16 @@ export class MintParams extends createToolParameters(
     token1Address: z
       .string()
       .describe('The address of the second token in the pair'),
-    tickLower: z
-      .number()
-      .optional()
-      .describe('The lower tick for the liquidity'),
-    tickUpper: z
-      .number()
-      .optional()
-      .describe('The upper tick for the liquidity'),
-    amount0Desired: z
-      .string()
-      .describe('The amount of token0 to add in base units'),
-    amount1Desired: z
-      .string()
-      .describe('The amount of token1 to add in base units'),
-    amount0Min: z
-      .string()
-      .describe('The minimum amount of token0 to add in base units'),
-    amount1Min: z
-      .string()
-      .describe('The minimum amount of token1 to add in base units'),
+    amount0Desired: z.string().describe('The amount of token0 to add'),
+    amount1Desired: z.string().describe('The amount of token1 to add'),
     deadline: z.number().describe('The deadline for the swap'),
+    riskLevel: z
+      .number()
+      .min(1)
+      .max(5)
+      .describe(
+        'Risk level for position range (1: most conservative, 5: most aggressive)',
+      ),
   }),
 ) {}
 
@@ -224,5 +216,26 @@ export class GlobalStateResponseParams extends createToolParameters(
         'The community fee represented as a percent of all collected fee in thousandths',
       ),
     unlocked: z.boolean().describe('Whether the pool is unlocked'),
+  }),
+) {}
+
+export class GetLPTokensParams extends createToolParameters(
+  z.object({
+    userAddress: z
+      .string()
+      .describe('The address of the user to check LP token positions for'),
+  }),
+) {}
+
+export class CalculatePositionAPYParams extends createToolParameters(
+  z.object({
+    tokenId: z.string().describe('The token ID of the liquidity position'),
+    daysToConsider: z
+      .number()
+      .optional()
+      .default(365)
+      .describe(
+        'Number of days to consider for APY calculation (default: 365)',
+      ),
   }),
 ) {}
