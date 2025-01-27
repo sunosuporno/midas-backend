@@ -58,7 +58,7 @@ export class Erc20Service {
 
   @Tool({
     description:
-      'Get the balance of an ERC20 token in base units. Convert to decimal units before returning.',
+      'Get the balance of an ERC20 token in base units and its USD value.',
   })
   async getTokenBalance(
     walletClient: EVMWalletClient,
@@ -75,9 +75,44 @@ export class Erc20Service {
         functionName: 'balanceOf',
         args: [resolvedWalletAddress],
       });
-      return rawBalance.value.toString();
+
+      // Get price feed ID from Pyth
+      const pythResponse = await fetch(
+        `https://hermes.pyth.network/v2/price_feeds?query=${parameters.name.toLowerCase()}&asset_type=crypto`,
+      );
+      const pythData = await pythResponse.json();
+
+      if (!pythData[0]?.id) {
+        return {
+          balance: rawBalance.value.toString(),
+          valueUSD: null,
+          error: 'Price feed not found',
+        };
+      }
+
+      // Get latest price from Pyth
+      const priceResponse = await fetch(
+        `https://hermes.pyth.network/v2/updates/price/latest?ids%5B%5D=${pythData[0].id}&encoding=hex&parsed=true`,
+      );
+      const priceData = await priceResponse.json();
+
+      // Calculate USD value
+      const price = Number(priceData.parsed[0].price.price) / 1e8;
+      const balanceInTokens =
+        Number(rawBalance.value) / 10 ** parameters.tokenDecimals;
+      const valueUSD = balanceInTokens * price;
+
+      return {
+        balance: rawBalance.value.toString(),
+        valueUSD: valueUSD.toFixed(2),
+      };
     } catch (error) {
-      throw Error(`Failed to fetch balance: ${error}`);
+      console.error('Error fetching balance and price:', error);
+      return {
+        balance: '0',
+        valueUSD: null,
+        error: `Failed to fetch balance and price: ${error}`,
+      };
     }
   }
 

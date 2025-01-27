@@ -14,6 +14,7 @@ import {
 } from '../workspace/goat-sdk/plugins/erc20/src';
 import { modeVoting } from '../workspace/goat-sdk/plugins/mode-voting/src';
 import { kim } from '../workspace/goat-sdk/plugins/kim/src';
+import { ironclad } from '../workspace/goat-sdk/plugins/ironclad/src';
 import { sendETH } from '@goat-sdk/wallet-evm';
 import { openai } from '@ai-sdk/openai';
 import { ChainType } from './dto/agent-call.dto';
@@ -266,6 +267,7 @@ export class AppService {
           erc20({ tokens: [USDC, USDT, MODE] }),
           modeVoting(),
           kim(),
+          ironclad(),
         ],
       });
 
