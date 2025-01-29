@@ -1,5 +1,14 @@
 import { Tool } from '@goat-sdk/core';
 import { EVMWalletClient } from '@goat-sdk/wallet-evm';
+import { BigNumber } from '@ethersproject/bignumber';
+import JSBI from 'jsbi';
+import {
+  Pool,
+  Position,
+  Token,
+  TickDataProvider,
+} from '@cryptoalgebra/integral-sdk';
+import { formatUnits } from 'viem';
 import { parseUnits } from 'viem';
 import { encodeAbiParameters } from 'viem';
 import { ERC20_ABI } from './abi/erc20';
@@ -20,13 +29,47 @@ import {
   IncreaseLiquidityParams,
   MintParams,
   GetLPTokensParams,
-  CalculatePositionAPYParams,
 } from './parameters';
+import { BigintIsh } from '@cryptoalgebra/integral-sdk/dist/types/BigIntish';
 
 const SWAP_ROUTER_ADDRESS = '0xAc48FcF1049668B285f3dC72483DF5Ae2162f7e8';
 const POSITION_MANAGER_ADDRESS = '0x2e8614625226D26180aDf6530C3b1677d3D7cf10';
 const FACTORY_ADDRESS = '0xB5F00c2C5f8821155D8ed27E31932CFD9DB3C5D5';
 const CALCULATOR_ADDRESS = '0x6f8E2B58373aB12Be5f7c28658633dD27D689f0D';
+
+// interface Token {
+//   chainId: number;
+//   address: string;
+//   decimals: number;
+//   symbol?: string;
+//   name?: string;
+// }
+
+// interface TickDataProvider {
+//   getTick(tick: number): Promise<{ liquidityNet: bigint }>;
+//   nextInitializedTickWithinOneWord(
+//     tick: number,
+//     lte: boolean,
+//   ): Promise<[number, boolean]>;
+// }
+
+// interface Pool {
+//   token0: Token;
+//   token1: Token;
+//   fee: number;
+//   sqrtRatioX96: bigint;
+//   liquidity: bigint;
+//   tickCurrent: number;
+//   tickSpacing: number;
+//   tickDataProvider: TickDataProvider;
+// }
+
+// interface Position {
+//   pool: Pool;
+//   tickLower: number;
+//   tickUpper: number;
+//   liquidity: bigint;
+// }
 
 export class KimService {
   @Tool({
@@ -96,7 +139,7 @@ export class KimService {
       const limitSqrtPrice = parameters.limitSqrtPrice;
       const timestamp = Math.floor(Date.now() / 1000) + parameters.deadline;
 
-      const approvalHash = await walletClient.sendTransaction({
+      await walletClient.sendTransaction({
         to: parameters.tokenInAddress as `0x${string}`,
         abi: ERC20_ABI,
         functionName: 'approve',
@@ -372,14 +415,14 @@ export class KimService {
         ? [parameters.amount0Desired, parameters.amount1Desired]
         : [parameters.amount1Desired, parameters.amount0Desired];
 
-      const approvalHash0 = await walletClient.sendTransaction({
+      await walletClient.sendTransaction({
         to: token0 as `0x${string}`,
         abi: ERC20_ABI,
         functionName: 'approve',
         args: [POSITION_MANAGER_ADDRESS, amount0Raw],
       });
 
-      const approvalHash1 = await walletClient.sendTransaction({
+      await walletClient.sendTransaction({
         to: token1 as `0x${string}`,
         abi: ERC20_ABI,
         functionName: 'approve',
@@ -430,9 +473,9 @@ export class KimService {
       });
 
       // biome-ignore lint/suspicious/noExplicitAny: value is any
-      const position = (positionResult as { value: any[] }).value;
+      const positionData = (positionResult as { value: any[] }).value;
 
-      const currentLiquidity = position[6];
+      const currentLiquidity = positionData[6];
       const liquidityToRemove =
         (currentLiquidity * BigInt(parameters.percentage)) / BigInt(100);
 
@@ -520,296 +563,306 @@ export class KimService {
     }
   }
 
+  // private async getTokenDetails(
+  //   walletClient: EVMWalletClient,
+  //   tokenAddress: string,
+  //   chainId: number,
+  // ): Promise<Token> {
+  //   console.log('\n=== Getting Token Details ===');
+  //   console.log('Token Address:', tokenAddress);
+  //   console.log('Chain ID:', chainId);
+  //   try {
+  //     const [decimals, symbol, name] = await Promise.all([
+  //       walletClient.read({
+  //         address: tokenAddress as `0x${string}`,
+  //         abi: ERC20_ABI,
+  //         functionName: 'decimals',
+  //       }),
+  //       walletClient.read({
+  //         address: tokenAddress as `0x${string}`,
+  //         abi: ERC20_ABI,
+  //         functionName: 'symbol',
+  //       }),
+  //       walletClient.read({
+  //         address: tokenAddress as `0x${string}`,
+  //         abi: ERC20_ABI,
+  //         functionName: 'name',
+  //       }),
+  //     ]);
+
+  //     const tokenDetails = {
+  //       chainId,
+  //       address: tokenAddress,
+  //       decimals: Number(decimals.value),
+  //       symbol: symbol.value as string,
+  //       name: name.value as string,
+  //     };
+  //     console.log('Token Details:', tokenDetails);
+  //     return tokenDetails;
+  //   } catch (error) {
+  //     console.error('Error getting token details:', error);
+  //     throw error;
+  //   }
+  // }
+
   @Tool({
-    name: 'kim_get_LP_tokens',
-    description: 'Get all LP token positions (NFTs) owned by a user',
+    name: 'kim_get_lp_tokens',
+    description: 'Get all LP token positions for a user along with their APYs',
   })
   async getLPTokens(
     walletClient: EVMWalletClient,
     parameters: GetLPTokensParams,
-  ): Promise<Array<{ tokenId: string; index: number }>> {
+  ): Promise<
+    Array<{
+      tokenId: string;
+      apy: number;
+      position: Position;
+    }>
+  > {
     try {
+      // Get number of positions
       const balanceResult = await walletClient.read({
         address: POSITION_MANAGER_ADDRESS as `0x${string}`,
         abi: POSITION_MANAGER_ABI,
         functionName: 'balanceOf',
-        args: [parameters.userAddress as `0x${string}`],
+        args: [parameters.userAddress],
       });
+      const balance = balanceResult.value as bigint;
 
-      const balance = Number((balanceResult as { value: bigint }).value);
-
-      if (balance === 0) {
-        return [];
+      // Get all token IDs
+      const tokenIds: string[] = [];
+      for (let i = 0; i < Number(balance); i++) {
+        const tokenIdResult = await walletClient.read({
+          address: POSITION_MANAGER_ADDRESS as `0x${string}`,
+          abi: POSITION_MANAGER_ABI,
+          functionName: 'tokenOfOwnerByIndex',
+          args: [parameters.userAddress, BigInt(i)],
+        });
+        tokenIds.push(tokenIdResult.value.toString());
       }
 
-      // Now get each token ID
-      const tokenIds = await Promise.all(
-        Array.from({ length: balance }, async (_, index) => {
-          const tokenResult = await walletClient.read({
+      // Get position details and calculate APY for each position
+      const positions = await Promise.all(
+        tokenIds.map(async (tokenId) => {
+          // Get position data from contract
+          const positionResult = await walletClient.read({
             address: POSITION_MANAGER_ADDRESS as `0x${string}`,
             abi: POSITION_MANAGER_ABI,
-            functionName: 'tokenOfOwnerByIndex',
-            args: [parameters.userAddress as `0x${string}`, BigInt(index)],
+            functionName: 'positions',
+            args: [BigInt(tokenId)],
           });
+          const positionData = positionResult.value as any[];
+          const chainId = await walletClient.getChain().id;
 
-          const tokenId = (tokenResult as { value: bigint }).value;
+          // Create SDK Token instances
+          const token0 = new Token(
+            chainId,
+            positionData[2],
+            await this.getTokenDecimals(walletClient, positionData[2]),
+          );
+          const token1 = new Token(
+            chainId,
+            positionData[3],
+            await this.getTokenDecimals(walletClient, positionData[3]),
+          );
+
+          const poolAddress = (
+            await walletClient.read({
+              address: POSITION_MANAGER_ADDRESS as `0x${string}`,
+              abi: POSITION_MANAGER_ABI,
+              functionName: 'pool',
+              args: [BigInt(tokenId)],
+            })
+          ).value as `0x${string}`;
+
+          // Create tick data provider
+          const tickDataProvider: TickDataProvider = {
+            getTick: async (tick: number) => {
+              const result = await walletClient.read({
+                address: poolAddress as `0x${string}`,
+                abi: POOL_ABI,
+                functionName: 'ticks',
+                args: [tick],
+              });
+              return {
+                liquidityNet: BigInt(result.value[1].toString()),
+              };
+            },
+            nextInitializedTickWithinOneWord: async (
+              tick: number,
+              lte: boolean,
+            ) => {
+              const functionName = lte ? 'prevTickGlobal' : 'nextTickGlobal';
+              const result = await walletClient.read({
+                address: poolAddress as `0x${string}`,
+                abi: POOL_ABI,
+                functionName,
+                args: [],
+              });
+              return [Number(result.value), true];
+            },
+          };
+
+          // Create SDK Pool instance
+          const pool = new Pool(
+            token0,
+            token1,
+            Number(positionData[4]), // fee
+            JSBI.BigInt(positionData[8].toString()), // sqrtPriceX96
+            JSBI.BigInt(positionData[7].toString()), // liquidity
+            Number(positionData[9]), // tickCurrent
+            60, // tickSpacing - this is fixed for Algebra pools
+            tickDataProvider,
+          );
+
+          // Create SDK Position instance with correct interface
+          const position = new Position({
+            pool,
+            liquidity: JSBI.BigInt(positionData[7].toString()),
+            tickLower: Number(positionData[5]),
+            tickUpper: Number(positionData[6]),
+          });
+          // Calculate APY using SDK position data
+          const apy = this.calculatePositionAPY(
+            position,
+            [
+              {
+                feesUSD: (await this.fetchPoolFeeData(poolAddress)).toString(),
+              },
+            ],
+            await this.fetchNativeTokenPrice(),
+          );
 
           return {
-            tokenId: tokenId.toString(),
-            index: index,
+            tokenId,
+            position,
+            apy,
           };
         }),
       );
 
-      return tokenIds;
+      return positions;
     } catch (error) {
-      throw new Error(`Failed to get LP tokens: ${error}`);
+      console.error('Error fetching LP tokens:', error);
+      throw new Error(`Failed to fetch LP tokens: ${error}`);
     }
   }
 
-  @Tool({
-    name: 'kim_calculate_position_apy',
-    description:
-      'Calculate the APY for a liquidity position based on fees earned',
-  })
-  async calculatePositionAPY(
+  private calculatePositionAPY(
+    position: Position,
+    poolFeeData: { feesUSD: string }[],
+    nativePrice: number,
+  ): number {
+    try {
+      // Get pool's total liquidity from SDK
+      const totalLiquidity = position.pool.liquidity;
+
+      // Calculate liquidity ratio using SDK position
+      const liquidityRelation =
+        Number(position.liquidity) / Number(totalLiquidity);
+
+      // Calculate daily fees
+      const poolDayFees =
+        poolFeeData && poolFeeData.length > 0 && Number(poolFeeData[0].feesUSD);
+
+      if (!poolDayFees) return 0;
+
+      // Annualize fees
+      const yearFee = poolDayFees * 365;
+
+      // Use SDK to get token amounts
+      const { amount0, amount1 } = position.mintAmounts;
+
+      // Get token prices from pool
+      const token0Price = position.pool.token0Price;
+      const token1Price = position.pool.token1Price;
+
+      // Calculate TVL using SDK prices
+      const tvl =
+        Number(amount0.toString()) *
+          Number(token0Price.toSignificant(6)) *
+          nativePrice +
+        Number(amount1.toString()) *
+          Number(token1Price.toSignificant(6)) *
+          nativePrice;
+
+      if (!tvl) return 0;
+
+      // Calculate APY
+      return ((yearFee * liquidityRelation) / tvl) * 100;
+    } catch (error) {
+      console.error('Error calculating position APY:', error);
+      return 0;
+    }
+  }
+
+  private async getTokenDecimals(
     walletClient: EVMWalletClient,
-    parameters: CalculatePositionAPYParams,
-  ): Promise<{
-    apy: number;
-    feesEarned: {
-      token0Amount: string;
-      token1Amount: string;
-    };
-    positionValue: string;
-  }> {
+    tokenAddress: string,
+  ): Promise<number> {
+    const decimalsResult = await walletClient.read({
+      address: tokenAddress as `0x${string}`,
+      abi: ERC20_ABI,
+      functionName: 'decimals',
+    });
+    return Number(decimalsResult.value);
+  }
+
+  private async fetchNativeTokenPrice(): Promise<number> {
+    console.log('\n=== Fetching Native Token Price ===');
     try {
-      console.log('Calculating APY for position:', parameters.tokenId);
-
-      // Get position details
-      const positionResult = await walletClient.read({
-        address: POSITION_MANAGER_ADDRESS as `0x${string}`,
-        abi: POSITION_MANAGER_ABI,
-        functionName: 'positions',
-        args: [parameters.tokenId],
-      });
-      console.log('Position details:', positionResult.value);
-
-      // Extract position data
-      const position = positionResult.value;
-      const token0 = position[2];
-      const token1 = position[3];
-      const liquidity = position[6];
-      const feeGrowthInside0LastX128 = position[7];
-      const feeGrowthInside1LastX128 = position[8];
-
-      console.log('Extracted position data:', {
-        token0,
-        token1,
-        liquidity: liquidity.toString(),
-        feeGrowthInside0LastX128: feeGrowthInside0LastX128.toString(),
-        feeGrowthInside1LastX128: feeGrowthInside1LastX128.toString(),
-      });
-
-      // Get pool address
-      const poolAddressResult = await walletClient.read({
-        address: FACTORY_ADDRESS as `0x${string}`,
-        abi: KIM_FACTORY_ABI,
-        functionName: 'poolByPair',
-        args: [token0, token1],
-      });
-      const poolAddress = poolAddressResult.value as `0x${string}`;
-      console.log('Pool address:', poolAddress);
-
-      // Get current fee growth from pool
-      const [
-        currentFeeGrowth0,
-        currentFeeGrowth1,
-        token0Decimals,
-        token1Decimals,
-        globalStateResult,
-      ] = await Promise.all([
-        walletClient.read({
-          address: poolAddress,
-          abi: POOL_ABI,
-          functionName: 'totalFeeGrowth0Token',
-        }),
-        walletClient.read({
-          address: poolAddress,
-          abi: POOL_ABI,
-          functionName: 'totalFeeGrowth1Token',
-        }),
-        walletClient.read({
-          address: token0,
-          abi: ERC20_ABI,
-          functionName: 'decimals',
-        }),
-        walletClient.read({
-          address: token1,
-          abi: ERC20_ABI,
-          functionName: 'decimals',
-        }),
-        walletClient.read({
-          address: poolAddress,
-          abi: POOL_ABI,
-          functionName: 'globalState',
-        }),
-      ]);
-
-      console.log('Fee and price data:', {
-        currentFeeGrowth0: currentFeeGrowth0.value.toString(),
-        currentFeeGrowth1: currentFeeGrowth1.value.toString(),
-        token0Decimals: token0Decimals.value,
-        token1Decimals: token1Decimals.value,
-        globalState: globalStateResult.value,
-      });
-
-      // Calculate fees earned
-      const feesEarned0 = this.calculateFeesEarned(
-        currentFeeGrowth0.value as bigint,
-        feeGrowthInside0LastX128 as bigint,
-        liquidity as bigint,
-        Number(token0Decimals.value),
-      );
-      const feesEarned1 = this.calculateFeesEarned(
-        currentFeeGrowth1.value as bigint,
-        feeGrowthInside1LastX128 as bigint,
-        liquidity as bigint,
-        Number(token1Decimals.value),
-      );
-
-      console.log('Calculated fees earned:', {
-        feesEarned0,
-        feesEarned1,
-      });
-
-      // Calculate position value in terms of token0
-      const price = this.calculatePrice(
-        globalStateResult.value as readonly unknown[],
-      );
-      console.log('Calculated price:', price);
-
-      const positionValue = this.calculatePositionValue(
-        liquidity as bigint,
-        price,
-        Number(token0Decimals.value),
-        Number(token1Decimals.value),
-      );
-
-      // Calculate APY
-      const daysElapsed = parameters.daysToConsider || 365;
-      console.log('Days elapsed:', daysElapsed);
-
-      // Calculate daily fee return
-      const dailyFeeReturn = (feesEarned0 + feesEarned1 * price) / daysElapsed;
-
-      // Annualize the return
-      const annualizedReturn = dailyFeeReturn * 365;
-
-      // Calculate APY
-      const apy = (annualizedReturn / positionValue) * 100;
-
-      console.log('APY calculation:', {
-        daysElapsed,
-        annualizedReturn,
-        apy,
-      });
-
-      return {
-        apy,
-        feesEarned: {
-          token0Amount: feesEarned0.toString(),
-          token1Amount: feesEarned1.toString(),
+      const response = await fetch(
+        'https://api.goldsky.com/api/public/project_clmqdcfcs3f6d2ptj3yp05ndz/subgraphs/Algebra-Kim/0.0.4/gn',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            query: `query { bundles { id maticPriceUSD } }`,
+          }),
         },
-        positionValue: positionValue.toString(),
-      };
-    } catch (error) {
-      console.error('Error calculating APY:', error);
-      throw new Error(`Failed to calculate APY: ${error}`);
-    }
-  }
-
-  // Helper function to calculate position value
-  private calculatePositionValue(
-    liquidity: bigint,
-    price: number,
-    token0Decimals: number,
-    token1Decimals: number,
-  ): number {
-    try {
-      // Convert liquidity to a more manageable number while preserving precision
-      const liquidityDecimal = Number(liquidity);
-
-      // Calculate amounts using the liquidity
-      const amount0 = liquidityDecimal / Math.sqrt(price);
-      const amount1 = liquidityDecimal * Math.sqrt(price);
-
-      // Convert to token units
-      const amount0Adjusted = amount0 / 10 ** token0Decimals;
-      const amount1Adjusted = amount1 / 10 ** token1Decimals;
-
-      // Calculate total value in terms of token0
-      const totalValue = amount0Adjusted + amount1Adjusted * price;
-
-      console.log('Position value calculation:', {
-        liquidityDecimal,
-        amount0,
-        amount1,
-        amount0Adjusted,
-        amount1Adjusted,
-        totalValue,
-      });
-
-      return totalValue;
-    } catch (error) {
-      console.error('Error in calculatePositionValue:', error);
-      throw error;
-    }
-  }
-
-  // Helper function to calculate fees earned
-  private calculateFeesEarned(
-    currentFeeGrowth: bigint,
-    lastFeeGrowth: bigint,
-    liquidity: bigint,
-    decimals: number,
-  ): number {
-    try {
-      const feeGrowthDelta = currentFeeGrowth - lastFeeGrowth;
-      // Convert to decimal before division to prevent overflow
-      const feesRaw = (Number(feeGrowthDelta) * Number(liquidity)) / 2 ** 128;
-      const feesAdjusted = feesRaw / 10 ** decimals;
-
-      console.log('Fee calculation:', {
-        feeGrowthDelta: feeGrowthDelta.toString(),
-        feesRaw,
-        feesAdjusted,
-      });
-
-      return feesAdjusted;
-    } catch (error) {
-      console.error('Error in calculateFeesEarned:', error);
-      throw error;
-    }
-  }
-
-  // Calculate price from globalState
-  private calculatePrice(globalState: readonly unknown[]): number {
-    try {
-      const sqrtPriceX96 = globalState[0] as bigint;
-      const sqrtPrice = Number(sqrtPriceX96) / 2 ** 96;
-      // Price is in terms of token1/token0
-      const price = sqrtPrice * sqrtPrice;
-
-      console.log('Price calculation:', {
-        sqrtPriceX96: sqrtPriceX96.toString(),
-        sqrtPrice,
-        price,
-      });
-
+      );
+      const data = await response.json();
+      const price = Number(data.data.bundles[0].maticPriceUSD);
+      console.log('Native Token Price:', price);
       return price;
     } catch (error) {
-      console.error('Error in calculatePrice:', error);
+      console.error('Error fetching native price:', error);
+      throw error;
+    }
+  }
+
+  private async fetchPoolFeeData(poolAddress: string): Promise<number> {
+    console.log('\n=== Fetching Pool Fee Data ===');
+    console.log('Pool Address:', poolAddress);
+    try {
+      const response = await fetch(
+        'https://api.goldsky.com/api/public/project_clmqdcfcs3f6d2ptj3yp05ndz/subgraphs/Algebra-Kim/0.0.4/gn',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            query: `query PoolFeeData($poolId: String) {
+              poolDayDatas(
+                where: { pool: $poolId }
+                orderBy: date
+                orderDirection: desc
+              ) {
+                feesUSD
+              }
+            }`,
+            variables: { poolId: poolAddress.toLowerCase() },
+          }),
+        },
+      );
+      const data = await response.json();
+      const poolDayDatas = data.data.poolDayDatas;
+      const fees =
+        poolDayDatas.length > 0 ? Number(poolDayDatas[0].feesUSD) : 0;
+      console.log('Pool Day Data Length:', poolDayDatas.length);
+      console.log('Pool Fees USD:', fees);
+      return fees;
+    } catch (error) {
+      console.error('Error fetching pool fee data:', error);
       throw error;
     }
   }
