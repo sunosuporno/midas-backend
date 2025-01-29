@@ -529,6 +529,10 @@ export class KimService {
     parameters: GetLPTokensParams,
   ): Promise<Array<{ tokenId: string; index: number }>> {
     try {
+      console.log('\n=== Getting LP Tokens ===');
+      console.log('User address:', parameters.userAddress);
+      console.log('Position Manager address:', POSITION_MANAGER_ADDRESS);
+
       const balanceResult = await walletClient.read({
         address: POSITION_MANAGER_ADDRESS as `0x${string}`,
         abi: POSITION_MANAGER_ABI,
@@ -537,14 +541,18 @@ export class KimService {
       });
 
       const balance = Number((balanceResult as { value: bigint }).value);
+      console.log('Number of LP tokens:', balance);
 
       if (balance === 0) {
+        console.log('User has no LP tokens');
         return [];
       }
 
+      console.log('Fetching token IDs...');
       // Now get each token ID
       const tokenIds = await Promise.all(
         Array.from({ length: balance }, async (_, index) => {
+          console.log(`\nFetching token at index ${index}...`);
           const tokenResult = await walletClient.read({
             address: POSITION_MANAGER_ADDRESS as `0x${string}`,
             abi: POSITION_MANAGER_ABI,
@@ -553,6 +561,7 @@ export class KimService {
           });
 
           const tokenId = (tokenResult as { value: bigint }).value;
+          console.log(`Token ID at index ${index}:`, tokenId.toString());
 
           return {
             tokenId: tokenId.toString(),
@@ -561,8 +570,10 @@ export class KimService {
         }),
       );
 
+      console.log('\nAll token IDs:', tokenIds);
       return tokenIds;
     } catch (error) {
+      console.error('Error in getLPTokens:', error);
       throw new Error(`Failed to get LP tokens: ${error}`);
     }
   }
