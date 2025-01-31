@@ -918,7 +918,7 @@ export class IroncladService {
   @Tool({
     name: 'withdraw_ironclad',
     description:
-      'Withdraw an asset from Ironclad lending pool. Make sure to check the address of the concerned token in the current network',
+      'Withdraw an asset from Ironclad lending pool. If no amount specified, withdraws full balance.',
   })
   async withdraw(
     walletClient: EVMWalletClient,
@@ -926,9 +926,24 @@ export class IroncladService {
   ): Promise<string> {
     try {
       console.log('💸 Starting withdrawal process...');
+
+      // Get full balance if amount not specified
+      let withdrawAmount = parameters.amount;
+      if (!withdrawAmount) {
+        console.log('Amount not specified, fetching full balance...');
+        const userReserveData = await walletClient.read({
+          address: PROTOCOL_DATA_PROVIDER_ADDRESS as `0x${string}`,
+          abi: PROTOCOL_DATA_PROVIDER_ABI,
+          functionName: 'getUserReserveData',
+          args: [parameters.assetAddress, walletClient.getAddress()],
+        });
+        withdrawAmount = (userReserveData as any).value[0].toString(); // aToken balance
+        console.log('Full balance to withdraw:', withdrawAmount);
+      }
+
       console.log('Parameters:', {
         asset: parameters.assetAddress,
-        amount: parameters.amount,
+        amount: withdrawAmount,
       });
 
       const withdrawTx = await walletClient.sendTransaction({
@@ -937,7 +952,7 @@ export class IroncladService {
         functionName: 'withdraw',
         args: [
           parameters.assetAddress,
-          parameters.amount,
+          withdrawAmount,
           walletClient.getAddress(),
         ],
       });
@@ -953,7 +968,7 @@ export class IroncladService {
   @Tool({
     name: 'repay_ironclad',
     description:
-      'Repay borrowed assets to Ironclad lending pool. Make sure to check the address of the concerned token in the current network',
+      'Repay borrowed assets to Ironclad lending pool. If no amount specified, repays full debt.',
   })
   async repay(
     walletClient: EVMWalletClient,
@@ -961,9 +976,24 @@ export class IroncladService {
   ): Promise<string> {
     try {
       console.log('💰 Starting repayment process...');
+
+      // Get current debt if amount not specified
+      let repayAmount = parameters.amount;
+      if (!repayAmount) {
+        console.log('Amount not specified, fetching current debt...');
+        const userReserveData = await walletClient.read({
+          address: PROTOCOL_DATA_PROVIDER_ADDRESS as `0x${string}`,
+          abi: PROTOCOL_DATA_PROVIDER_ABI,
+          functionName: 'getUserReserveData',
+          args: [parameters.assetAddress, walletClient.getAddress()],
+        });
+        repayAmount = (userReserveData as any).value[2].toString(); // variableDebt
+        console.log('Current debt to repay:', repayAmount);
+      }
+
       console.log('Parameters:', {
         asset: parameters.assetAddress,
-        amount: parameters.amount,
+        amount: repayAmount,
         interestRateMode: parameters.interestRateMode,
       });
 
@@ -973,7 +1003,7 @@ export class IroncladService {
         to: parameters.assetAddress as `0x${string}`,
         abi: ERC20_ABI,
         functionName: 'approve',
-        args: [LENDING_POOL_ADDRESS, parameters.amount],
+        args: [LENDING_POOL_ADDRESS, repayAmount],
       });
       console.log('✅ Approval transaction:', approvalTx.hash);
 
@@ -983,7 +1013,7 @@ export class IroncladService {
         functionName: 'repay',
         args: [
           parameters.assetAddress,
-          parameters.amount,
+          repayAmount,
           parameters.interestRateMode,
           walletClient.getAddress(),
         ],
@@ -1070,7 +1100,7 @@ export class IroncladService {
       console.log('Current LTV:', `${currentLTV}%`);
 
       // Calculate available to borrow
-      const maxBorrow = BigInt(Number(deposited) * ltv * 100) / 100n;
+      const maxBorrow = BigInt(Math.floor(Number(deposited) * ltv)); // Round down to avoid floating point
       const availableToBorrow =
         maxBorrow > borrowed
           ? ((maxBorrow - borrowed) / decimalsBigInt).toString()

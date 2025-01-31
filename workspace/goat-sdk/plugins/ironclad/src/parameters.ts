@@ -130,7 +130,12 @@ export class WithdrawParameters extends createToolParameters(
     assetAddress: z
       .string()
       .describe('The address of the asset to withdraw in the current network'),
-    amount: z.string().describe('The amount to withdraw in base units'),
+    amount: z
+      .string()
+      .optional()
+      .describe(
+        'The amount to withdraw in base units. If not specified, withdraws full balance',
+      ),
   }),
 ) {}
 
@@ -139,7 +144,12 @@ export class RepayParameters extends createToolParameters(
     assetAddress: z
       .string()
       .describe('The address of the asset to repay in the current network'),
-    amount: z.string().describe('The amount to repay in base units'),
+    amount: z
+      .string()
+      .optional()
+      .describe(
+        'The amount to repay in base units. If not specified, repays full debt',
+      ),
     interestRateMode: z
       .number()
       .default(2)
