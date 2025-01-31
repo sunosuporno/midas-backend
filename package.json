@@ -39,7 +39,10 @@
     "reflect-metadata": "^0.2.0",
     "rxjs": "^7.8.1",
     "viem": "^2.22.3",
-    "zod": "^3.23.8"
+    "zod": "^3.23.8",
+    "@goat-sdk/plugin-ironclad": "file:workspace/goat-sdk/plugins/ironclad",
+    "@goat-sdk/plugin-kim": "file:workspace/goat-sdk/plugins/kim",
+    "@goat-sdk/erc20": "file:workspace/goat-sdk/plugins/erc20"
   },
   "devDependencies": {
     "@nestjs/cli": "^10.0.0",
