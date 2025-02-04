@@ -6,11 +6,15 @@ async function bootstrap() {
 
   // Enable CORS
   app.enableCors({
-    origin: ['http://localhost:3000', 'https://yourdomain.com'],
+    origin: [
+      'http://localhost:3000',
+      'https://testing.trymidas.fun',
+      'https://trymidas.fun',
+    ],
     methods: 'GET,HEAD,PUT,PATCH,POST,DELETE',
     credentials: true,
   });
 
-  await app.listen(3001);
+  await app.listen(process.env.PORT || 8080, '0.0.0.0');
 }
 bootstrap();

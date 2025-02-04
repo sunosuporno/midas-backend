@@ -11,6 +11,7 @@ import { CreateDelegatedKeyDto } from './dto/create-delegated-key.dto';
 // import { CreateWalletDto } from './dto/create-wallet.dto';
 import { ApproveDelegateDto } from './dto/approve-delegate.dto';
 import { AgentCallDto } from './dto/agent-call.dto';
+import { SaveMessageDto } from './dto/save-message.dto';
 
 @Controller()
 export class AppController {
@@ -103,6 +104,23 @@ export class AppController {
         agentCallDto.walletAddress,
         agentCallDto.chain,
         agentCallDto.sessionId,
+      );
+    } catch (error) {
+      throw new HttpException(error.message, error.status || 500);
+    }
+  }
+
+  @Post('chat/:walletAddress/:sessionId/message')
+  async saveUserMessage(
+    @Param('walletAddress') walletAddress: string,
+    @Param('sessionId') sessionId: string,
+    @Body() message: SaveMessageDto,
+  ) {
+    try {
+      return await this.appService.saveUserMessage(
+        walletAddress,
+        sessionId,
+        message,
       );
     } catch (error) {
       throw new HttpException(error.message, error.status || 500);

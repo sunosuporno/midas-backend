@@ -1,6 +1,6 @@
 {
-  "name": "@goat-sdk/erc20",
-  "version": "1.0.0",
+  "name": "@goat-sdk/plugin-ironclad",
+  "version": "0.1.3",
   "files": [
     "dist/**/*",
     "README.md",

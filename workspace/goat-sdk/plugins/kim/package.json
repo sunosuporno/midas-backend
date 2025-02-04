@@ -1,6 +1,6 @@
 {
-  "name": "@goat-sdk/erc20",
-  "version": "1.0.0",
+  "name": "@goat-sdk/plugin-kim",
+  "version": "0.1.7",
   "files": [
     "dist/**/*",
     "README.md",

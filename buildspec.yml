@@ -1,0 +1,55 @@
+version: 0.2
+
+phases:
+  install:
+    runtime-versions:
+      nodejs: 22
+    commands:
+      - npm install -g npm@latest
+      - npm install -g typescript
+      - npm install -g @nestjs/cli
+
+  pre_build:
+    commands:
+      - echo Installing dependencies...
+      - npm ci
+      - echo Checking code quality...
+      - npm run lint || true
+
+  build:
+    commands:
+      - echo Build started...
+      - npm run build
+      # - echo Running tests...
+      # - npm run test || true
+
+  post_build:
+    commands:
+      - echo Build completed
+      - echo Copying necessary files...
+      - cp package*.json dist/
+
+artifacts:
+  files:
+    - dist/**/*
+    - node_modules/**/*
+    - package*.json
+    - README.md
+  base-directory: '.'
+  discard-paths: no
+
+cache:
+  paths:
+    - node_modules/**/*
+    - ~/.npm/**/*
+
+env:
+  variables:
+    NODE_ENV: ${ENVIRONMENT_NAME}
+  parameter-store:
+    MONGODB_URI: /${ENVIRONMENT_NAME}/midas/mongodb_uri
+    CROSSMINT_SERVER_API_KEY: /${ENVIRONMENT_NAME}/midas/crossmint_key
+    WALLET_SIGNER_SECRET_KEY: /${ENVIRONMENT_NAME}/midas/wallet_signer_secret_key
+    SIGNER_WALLET: /${ENVIRONMENT_NAME}/midas/signer_wallet
+    ALCHEMY_API_KEY_MODE: /${ENVIRONMENT_NAME}/midas/alchemy_key_mode
+    OPENAI_API_KEY: /${ENVIRONMENT_NAME}/midas/openai_key

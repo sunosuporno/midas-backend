@@ -6,7 +6,15 @@ import { ApproveDelegateDto } from './dto/approve-delegate.dto';
 import { generateText } from 'ai';
 import { getOnChainTools } from '@goat-sdk/adapter-vercel-ai';
 import { crossmint } from '@goat-sdk/crossmint';
-import { USDC, USDT, erc20 } from '../workspace/goat-sdk/plugins/erc20/src';
+import {
+  USDC,
+  USDT,
+  erc20,
+  MODE,
+} from '../workspace/goat-sdk/plugins/erc20/src';
+import { modeVoting } from '../workspace/goat-sdk/plugins/mode-voting/src';
+import { kim } from '../workspace/goat-sdk/plugins/kim/src';
+import { ironclad } from '../workspace/goat-sdk/plugins/ironclad/src';
 import { sendETH } from '@goat-sdk/wallet-evm';
 import { openai } from '@ai-sdk/openai';
 import { ChainType } from './dto/agent-call.dto';
@@ -23,7 +31,7 @@ export class AppService {
   ) {}
 
   getHello(): string {
-    return 'Hello World!';
+    return 'gm world!';
   }
 
   async createDelegatedKey(
@@ -184,6 +192,29 @@ export class AppService {
     return { sessionId };
   }
 
+  async saveUserMessage(
+    walletAddress: string,
+    sessionId: string,
+    message: {
+      content: string;
+      chain: ChainType;
+    },
+  ) {
+    return this.chatModel.findOneAndUpdate(
+      { walletAddress, sessionId },
+      {
+        $push: {
+          messages: {
+            role: 'user',
+            content: message.content,
+            chain: message.chain,
+            timestamp: new Date(),
+          },
+        },
+      },
+    );
+  }
+
   async getChatSessions(walletAddress: string) {
     return this.chatModel
       .find({ walletAddress })
@@ -231,12 +262,20 @@ export class AppService {
           chain,
           provider: alchemyApiKey,
         }),
-        plugins: [sendETH(), erc20({ tokens: [USDC, USDT] })],
+        plugins: [
+          sendETH(),
+          erc20({ tokens: [USDC, USDT, MODE] }),
+          modeVoting(),
+          kim(),
+          ironclad(),
+        ],
       });
 
       const result = await generateText({
         model: openai('gpt-4o'),
         tools: tools,
+        system:
+          'You name is Midas, named after the fabled King whose touch turned things to gold. As an agent, you are the best DeFi assistant there is who can do all types of DeFi actions like swapping, staking, voting, etc. When you are asked to do any action, search for the description which matches the action you are asked to do. If you find a match, use the tool to perform the action. Also, if a tool mentions to not call or call another tool in its description, make sure you follow the instructions. Send the data in a plain text format with heading on top and ',
         maxSteps: 12,
         prompt: prompt,
       });
@@ -247,25 +286,16 @@ export class AppService {
           { walletAddress, sessionId },
           {
             $push: {
-              messages: [
-                {
-                  role: 'user',
-                  content: prompt,
-                  chain,
-                  timestamp: new Date(),
-                },
-                {
-                  role: 'assistant',
-                  content: result.text,
-                  chain,
-                  timestamp: new Date(),
-                },
-              ],
+              messages: {
+                role: 'assistant',
+                content: result.text,
+                chain,
+                timestamp: new Date(),
+              },
             },
           },
         );
       }
-
       return {
         response: result.text,
       };
