@@ -5,12 +5,14 @@ import {
   UnauthorizedException,
 } from '@nestjs/common';
 import { createCrossmint, CrossmintAuth } from '@crossmint/server-sdk';
+import { Reflector } from '@nestjs/core';
+import { IS_PUBLIC_KEY } from '../decorators/public.decorator';
 
 @Injectable()
 export class CrossmintJwtGuard implements CanActivate {
   private crossmintAuth: CrossmintAuth;
 
-  constructor() {
+  constructor(private reflector: Reflector) {
     console.log('🔐 Initializing Crossmint Auth Guard...');
     const crossmint = createCrossmint({
       apiKey: process.env.CROSSMINT_SERVER_API_KEY,
@@ -20,6 +22,15 @@ export class CrossmintJwtGuard implements CanActivate {
   }
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
+    const isPublic = this.reflector.getAllAndOverride<boolean>(IS_PUBLIC_KEY, [
+      context.getHandler(),
+      context.getClass(),
+    ]);
+
+    if (isPublic) {
+      return true;
+    }
+
     console.log('\n=== Processing Authentication Request ===');
     const request = context.switchToHttp().getRequest();
     const authHeader = request.headers.authorization;

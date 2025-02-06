@@ -14,12 +14,14 @@ import { ApproveDelegateDto } from './dto/approve-delegate.dto';
 import { AgentCallDto } from './dto/agent-call.dto';
 import { SaveMessageDto } from './dto/save-message.dto';
 import { CrossmintJwtGuard } from './guards/jwt.guard';
+import { Public } from './decorators/public.decorator';
 
 @UseGuards(CrossmintJwtGuard)
 @Controller()
 export class AppController {
   constructor(private readonly appService: AppService) {}
 
+  @Public()
   @Get()
   getHello(): string {
     return this.appService.getHello();
