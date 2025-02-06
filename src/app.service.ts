@@ -216,10 +216,27 @@ export class AppService {
   }
 
   async getChatSessions(walletAddress: string) {
-    return this.chatModel
-      .find({ walletAddress })
-      .select('sessionId createdAt')
-      .sort({ createdAt: -1 });
+    console.log('=== Getting Chat Sessions ===');
+    console.log('Wallet Address:', walletAddress);
+
+    try {
+      const sessions = await this.chatModel
+        .find({ walletAddress })
+        .select('sessionId createdAt')
+        .sort({ createdAt: -1 });
+
+      console.log('Found sessions:', sessions); // Debug log
+
+      if (!sessions || sessions.length === 0) {
+        console.log('No sessions found for wallet address');
+        return [];
+      }
+
+      return sessions;
+    } catch (error) {
+      console.error('Error fetching chat sessions:', error);
+      throw error;
+    }
   }
 
   async getChatHistory(walletAddress: string, sessionId: string) {

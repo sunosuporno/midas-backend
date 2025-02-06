@@ -4,13 +4,18 @@ import { AppModule } from './app.module';
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
 
-  // Enable CORS
+  // Determine allowed origins based on NODE_ENV
+  const allowedOrigins =
+    process.env.NODE_ENV === 'production'
+      ? ['https://trymidas.fun']
+      : [
+          'http://localhost:3000',
+          'https://testing.trymidas.fun',
+          'https://trymidas.fun',
+        ];
+
   app.enableCors({
-    origin: [
-      'http://localhost:3000',
-      'https://testing.trymidas.fun',
-      'https://trymidas.fun',
-    ],
+    origin: allowedOrigins,
     methods: 'GET,HEAD,PUT,PATCH,POST,DELETE',
     credentials: true,
   });
