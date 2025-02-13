@@ -113,6 +113,28 @@ export const WETH: Token = {
   },
 };
 
+export const wrsETH: Token = {
+  decimals: 18,
+  symbol: 'wrsETH',
+  name: 'rsETHWrapper',
+  chains: {
+    '34443': {
+      contractAddress: '0xe7903B1F75C534Dd8159b313d92cDCfbC62cB3Cd',
+    },
+  },
+};
+
+export const ezETH: Token = {
+  decimals: 18,
+  symbol: 'ezETH',
+  name: 'Renzo Restaked ETH',
+  chains: {
+    '34443': {
+      contractAddress: '0x2416092f143378750bb29b79eD961ab195CcEea5',
+    },
+  },
+};
+
 export function getTokensForNetwork(
   chainId: number,
   tokens: Token[],
