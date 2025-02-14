@@ -9,6 +9,9 @@ import { crossmint } from '@goat-sdk/crossmint';
 import {
   USDC,
   USDT,
+  WETH,
+  ezETH,
+  wrsETH,
   erc20,
   MODE,
 } from '../workspace/goat-sdk/plugins/erc20/src';
@@ -22,13 +25,77 @@ import { Model } from 'mongoose';
 import { InjectModel } from '@nestjs/mongoose';
 import { Chat } from './schemas/chat.schema';
 import { v4 as uuidv4 } from 'uuid';
+import { createCipheriv, randomBytes } from 'crypto';
+import { ApiKey } from './schemas/api-key.schema';
 
 @Injectable()
 export class AppService {
   constructor(
     @InjectModel(Chat.name) private chatModel: Model<Chat>,
+    @InjectModel(ApiKey.name) private apiKeyModel: Model<ApiKey>,
     private configService: ConfigService,
   ) {}
+
+  private readonly ENCRYPTION_KEY =
+    this.configService.get<string>('ENCRYPTION_KEY');
+
+  private encrypt(text: string): string {
+    const iv = randomBytes(16);
+    const key = Buffer.from(this.ENCRYPTION_KEY).slice(0, 32);
+    const cipher = createCipheriv('aes-256-cbc', key, iv);
+    let encrypted = cipher.update(text);
+    encrypted = Buffer.concat([encrypted, cipher.final()]);
+    return `${iv.toString('hex')}:${encrypted.toString('hex')}`;
+  }
+
+  async generateApiKey(walletAddress: string): Promise<{ apiKey: string }> {
+    try {
+      console.log('=== Generating API Key ===');
+      console.log('Wallet Address:', walletAddress);
+
+      // Check if wallet already has an API key
+      const existingKey = await this.apiKeyModel.findOne({ walletAddress });
+      if (existingKey) {
+        console.log('API key already exists for wallet');
+        throw new HttpException('API key already exists for this wallet', 400);
+      }
+
+      const apiKey = randomBytes(32).toString('hex');
+      console.log('Generated API Key:', apiKey);
+
+      const encryptedKey = this.encrypt(apiKey);
+      console.log('Encrypted Key:', encryptedKey);
+
+      const apiKeyDoc = await this.apiKeyModel.create({
+        walletAddress,
+        encryptedKey,
+      });
+      console.log('Saved to database with ID:', apiKeyDoc._id);
+
+      return { apiKey };
+    } catch (error) {
+      console.error('Error generating API key:', error);
+      throw new HttpException(
+        error.message || 'Failed to generate API key',
+        error.status || 500,
+      );
+    }
+  }
+
+  async validateApiKey(apiKey: string): Promise<string> {
+    if (!apiKey) {
+      throw new HttpException('API key is required', 401);
+    }
+
+    const encryptedKey = this.encrypt(apiKey);
+    const keyDoc = await this.apiKeyModel.findOne({ encryptedKey });
+
+    if (!keyDoc) {
+      throw new HttpException('Invalid API key', 401);
+    }
+
+    return keyDoc.walletAddress;
+  }
 
   getHello(): string {
     return 'gm world!';
@@ -281,7 +348,7 @@ export class AppService {
         }),
         plugins: [
           sendETH(),
-          erc20({ tokens: [USDC, USDT, MODE] }),
+          erc20({ tokens: [USDC, USDT, MODE, WETH, ezETH, wrsETH] }),
           modeVoting(),
           kim(),
           ironclad(),
@@ -296,7 +363,7 @@ export class AppService {
         maxSteps: 12,
         prompt: prompt,
       });
-
+      console.log('chain:', chain);
       // Save the conversation
       if (sessionId) {
         await this.chatModel.findOneAndUpdate(
@@ -362,6 +429,67 @@ export class AppService {
       console.error('Error in checkDelegated:', error);
       throw new HttpException(
         error.response?.data?.message || 'Failed to check delegation',
+        error.response?.status || 500,
+      );
+    }
+  }
+
+  async callAgentPublic(prompt: string, walletAddress: string, chain: string) {
+    try {
+      console.log('=== Calling Agent (Public) ===');
+      const apiKey = this.configService.get<string>('CROSSMINT_SERVER_API_KEY');
+      const walletSignerSecretKey = this.configService.get<string>(
+        'WALLET_SIGNER_SECRET_KEY',
+      );
+      const alchemyApiKey = this.configService.get<string>(
+        'ALCHEMY_API_KEY_MODE',
+      );
+
+      if (
+        !apiKey ||
+        !walletSignerSecretKey ||
+        !alchemyApiKey ||
+        !walletAddress
+      ) {
+        throw new Error('Missing required environment variables');
+      }
+
+      const { smartwallet } = crossmint(apiKey);
+
+      const tools = await getOnChainTools({
+        wallet: await smartwallet({
+          address: walletAddress,
+          signer: {
+            secretKey: walletSignerSecretKey as `0x${string}`,
+          },
+          chain: chain as ChainType,
+          provider: alchemyApiKey,
+        }),
+        plugins: [
+          sendETH(),
+          erc20({ tokens: [USDC, USDT, MODE, WETH, ezETH, wrsETH] }),
+          modeVoting(),
+          kim(),
+          ironclad(),
+        ],
+      });
+
+      const result = await generateText({
+        model: openai('gpt-4o'),
+        tools: tools,
+        system:
+          'You name is Midas, named after the fabled King whose touch turned things to gold. As an agent, you are the best DeFi assistant there is who can do all types of DeFi actions like swapping, staking, voting, etc. When you are asked to do any action, search for the description which matches the action you are asked to do. If you find a match, use the tool to perform the action. Also, if a tool mentions to not call or call another tool in its description, make sure you follow the instructions. Send the data in a plain text format. NO MARKDOWN.',
+        maxSteps: 12,
+        prompt: prompt,
+      });
+
+      return {
+        response: result.text,
+      };
+    } catch (error) {
+      console.error('Error in callAgentPublic:', error);
+      throw new HttpException(
+        error.message || 'Failed to process agent request',
         error.response?.status || 500,
       );
     }
