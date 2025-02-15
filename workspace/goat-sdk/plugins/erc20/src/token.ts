@@ -56,6 +56,9 @@ export const USDC: Token = {
     '34443': {
       contractAddress: '0xd988097fb8612cc24eeC14542bC03424c656005f',
     },
+    '5000': {
+      contractAddress: '0x09Bc4E0D864854c6aFB6eB9A9cdF58aC190D0dF9',
+    },
   },
 };
 
@@ -72,6 +75,9 @@ export const USDT: Token = {
     },
     '8453': {
       contractAddress: '0xfde4C96c8593536E31F229EA8f37b2ADa2699bb2',
+    },
+    '5000': {
+      contractAddress: '0x201EBa5CC46D216Ce6DC03F6a759e8E766e956aE',
     },
   },
 };
@@ -109,6 +115,31 @@ export const WETH: Token = {
     },
     '137': {
       contractAddress: '0x7ceB23fD6bC0adD59E62ac25578270cFf1b9f619',
+    },
+    '5000': {
+      contractAddress: '0xdEAddEaDdeadDEadDEADDEAddEADDEAddead1111',
+    },
+  },
+};
+
+export const wrsETH: Token = {
+  decimals: 18,
+  symbol: 'wrsETH',
+  name: 'rsETHWrapper',
+  chains: {
+    '34443': {
+      contractAddress: '0xe7903B1F75C534Dd8159b313d92cDCfbC62cB3Cd',
+    },
+  },
+};
+
+export const ezETH: Token = {
+  decimals: 18,
+  symbol: 'ezETH',
+  name: 'Renzo Restaked ETH',
+  chains: {
+    '34443': {
+      contractAddress: '0x2416092f143378750bb29b79eD961ab195CcEea5',
     },
   },
 };

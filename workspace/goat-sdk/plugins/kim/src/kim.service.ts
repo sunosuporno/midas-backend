@@ -21,12 +21,37 @@ import {
   MintParams,
   GetLPTokensParams,
   CalculatePositionAPYParams,
+  GetPositionDetailsParams,
 } from './parameters';
 
 const SWAP_ROUTER_ADDRESS = '0xAc48FcF1049668B285f3dC72483DF5Ae2162f7e8';
 const POSITION_MANAGER_ADDRESS = '0x2e8614625226D26180aDf6530C3b1677d3D7cf10';
 const FACTORY_ADDRESS = '0xB5F00c2C5f8821155D8ed27E31932CFD9DB3C5D5';
 const CALCULATOR_ADDRESS = '0x6f8E2B58373aB12Be5f7c28658633dD27D689f0D';
+
+interface TokenDetails {
+  symbol: string;
+  decimals: number;
+  collectedFees: string;
+  collected: string;
+  deposited: string;
+}
+
+interface PositionDetails {
+  tokenId: string;
+  tokens: {
+    token0Symbol: string;
+    token1Symbol: string;
+  };
+  collectedFees: {
+    token0: string;
+    token1: string;
+  };
+  depositedAmount: {
+    token0: string;
+    token1: string;
+  };
+}
 
 export class KimService {
   @Tool({
@@ -822,6 +847,79 @@ export class KimService {
     } catch (error) {
       console.error('Error in calculatePrice:', error);
       throw error;
+    }
+  }
+
+  @Tool({
+    name: 'kim_get_position_details',
+    description:
+      'Get detailed information about a liquidity position including token names, amounts, and fees',
+  })
+  async getPositionDetails(
+    walletClient: EVMWalletClient,
+    parameters: GetPositionDetailsParams,
+  ): Promise<PositionDetails> {
+    try {
+      const query = `
+        query GetPositionDetails($positionId: ID!) {
+          position(id: $positionId) {
+            id
+            collectedFeesToken0
+            collectedFeesToken1
+            token0 {
+              symbol
+            }
+            token1 {
+              symbol
+            }
+            depositedToken0
+            depositedToken1
+          }
+        }
+      `;
+
+      const response = await fetch(
+        'https://api.goldsky.com/api/public/project_clmqdcfcs3f6d2ptj3yp05ndz/subgraphs/Algebra-Kim/0.0.4/gn',
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            query,
+            variables: {
+              positionId: parameters.tokenId,
+            },
+          }),
+        },
+      );
+
+      const result = await response.json();
+
+      if (!result.data?.position) {
+        throw new Error('Position not found');
+      }
+
+      const position = result.data.position;
+
+      return {
+        tokenId: position.id,
+        tokens: {
+          token0Symbol: position.token0.symbol,
+          token1Symbol: position.token1.symbol,
+        },
+        collectedFees: {
+          token0: position.collectedFeesToken0,
+          token1: position.collectedFeesToken1,
+        },
+        depositedAmount: {
+          token0: position.depositedToken0,
+          token1: position.depositedToken1,
+        },
+      };
+    } catch (error) {
+      console.error('Error getting position details:', error);
+      throw new Error(`Failed to get position details: ${error}`);
     }
   }
 }

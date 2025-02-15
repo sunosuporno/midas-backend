@@ -6,6 +6,7 @@ import { AppService } from './app.service';
 import { Chat, ChatSchema } from './schemas/chat.schema';
 import { JwtModule } from '@nestjs/jwt';
 import { CrossmintJwtGuard } from './guards/jwt.guard';
+import { ApiKey, ApiKeySchema } from './schemas/api-key.schema';
 
 @Module({
   imports: [
@@ -13,7 +14,10 @@ import { CrossmintJwtGuard } from './guards/jwt.guard';
     MongooseModule.forRoot(process.env.MONGODB_URI, {
       dbName: process.env.NODE_ENV === 'production' ? 'midas_prod' : 'test',
     }),
-    MongooseModule.forFeature([{ name: Chat.name, schema: ChatSchema }]),
+    MongooseModule.forFeature([
+      { name: Chat.name, schema: ChatSchema },
+      { name: ApiKey.name, schema: ApiKeySchema },
+    ]),
     JwtModule.register({
       global: true,
     }),

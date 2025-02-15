@@ -239,3 +239,11 @@ export class CalculatePositionAPYParams extends createToolParameters(
       ),
   }),
 ) {}
+
+export class GetPositionDetailsParams extends createToolParameters(
+  z.object({
+    tokenId: z
+      .string()
+      .describe('The token ID of the liquidity position to query'),
+  }),
+) {}

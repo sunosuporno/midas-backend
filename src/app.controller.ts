@@ -6,6 +6,7 @@ import {
   Param,
   HttpException,
   UseGuards,
+  Headers,
 } from '@nestjs/common';
 import { AppService } from './app.service';
 import { CreateDelegatedKeyDto } from './dto/create-delegated-key.dto';
@@ -15,6 +16,12 @@ import { AgentCallDto } from './dto/agent-call.dto';
 import { SaveMessageDto } from './dto/save-message.dto';
 import { CrossmintJwtGuard } from './guards/jwt.guard';
 import { Public } from './decorators/public.decorator';
+
+export class AgentViemCallDto {
+  prompt: string;
+  chain: string;
+  privateKey: string;
+}
 
 @UseGuards(CrossmintJwtGuard)
 @Controller()
@@ -126,6 +133,52 @@ export class AppController {
         walletAddress,
         sessionId,
         message,
+      );
+    } catch (error) {
+      throw new HttpException(error.message, error.status || 500);
+    }
+  }
+
+  @Post('generate-api-key')
+  async generateApiKey(@Body() body: { walletAddress: string }) {
+    try {
+      return await this.appService.generateApiKey(body.walletAddress);
+    } catch (error) {
+      throw new HttpException(error.message, error.status || 500);
+    }
+  }
+
+  @Public()
+  @Post('call/agent/public')
+  async callAgentPublic(
+    @Headers('x-api-key') apiKey: string,
+    @Body()
+    body: {
+      prompt: string;
+      chain: string;
+    },
+  ) {
+    try {
+      const walletAddress = await this.appService.validateApiKey(apiKey);
+      console.log('Using wallet address:', walletAddress);
+      return await this.appService.callAgentPublic(
+        body.prompt,
+        walletAddress,
+        body.chain,
+      );
+    } catch (error) {
+      throw new HttpException(error.message, error.status || 500);
+    }
+  }
+
+  @Public()
+  @Post('call/agent/viem')
+  async callAgentViem(@Body() agentCallDto: AgentViemCallDto) {
+    try {
+      return await this.appService.callAgentViem(
+        agentCallDto.prompt,
+        agentCallDto.chain,
+        agentCallDto.privateKey,
       );
     } catch (error) {
       throw new HttpException(error.message, error.status || 500);

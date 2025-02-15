@@ -12,6 +12,8 @@ async function bootstrap() {
           'http://localhost:3000',
           'https://testing.trymidas.fun',
           'https://trymidas.fun',
+          'http://localhost:3001',
+          'raycast://',
         ];
 
   app.enableCors({
