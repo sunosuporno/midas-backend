@@ -28,6 +28,7 @@
     "@goat-sdk/erc20": "file:workspace/goat-sdk/plugins/erc20",
     "@goat-sdk/plugin-ironclad": "file:workspace/goat-sdk/plugins/ironclad",
     "@goat-sdk/plugin-kim": "file:workspace/goat-sdk/plugins/kim",
+    "@goat-sdk/plugin-merchant-moe": "file:workspace/goat-sdk/plugins/merchant-moe",
     "@goat-sdk/wallet-evm": "^0.2.5",
     "@nestjs/common": "^10.0.0",
     "@nestjs/config": "^3.3.0",
