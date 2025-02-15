@@ -154,6 +154,7 @@ export class AppController {
   ) {
     try {
       const walletAddress = await this.appService.validateApiKey(apiKey);
+      console.log('Using wallet address:', walletAddress);
       return await this.appService.callAgentPublic(
         body.prompt,
         walletAddress,

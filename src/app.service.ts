@@ -25,7 +25,7 @@ import { Model } from 'mongoose';
 import { InjectModel } from '@nestjs/mongoose';
 import { Chat } from './schemas/chat.schema';
 import { v4 as uuidv4 } from 'uuid';
-import { createCipheriv, randomBytes } from 'crypto';
+import { createCipheriv, randomBytes, createHash } from 'crypto';
 import { ApiKey } from './schemas/api-key.schema';
 
 @Injectable()
@@ -40,8 +40,11 @@ export class AppService {
     this.configService.get<string>('ENCRYPTION_KEY');
 
   private encrypt(text: string): string {
-    const iv = randomBytes(16);
+    // Generate a deterministic IV based on the input text
+    const hash = createHash('sha256').update(text).digest();
+    const iv = hash.slice(0, 16); // Use first 16 bytes as IV
     const key = Buffer.from(this.ENCRYPTION_KEY).slice(0, 32);
+
     const cipher = createCipheriv('aes-256-cbc', key, iv);
     let encrypted = cipher.update(text);
     encrypted = Buffer.concat([encrypted, cipher.final()]);
@@ -86,8 +89,9 @@ export class AppService {
     if (!apiKey) {
       throw new HttpException('API key is required', 401);
     }
-
+    console.log('API Key:', apiKey);
     const encryptedKey = this.encrypt(apiKey);
+    console.log('Encrypted Key:', encryptedKey);
     const keyDoc = await this.apiKeyModel.findOne({ encryptedKey });
 
     if (!keyDoc) {
@@ -437,6 +441,31 @@ export class AppService {
   async callAgentPublic(prompt: string, walletAddress: string, chain: string) {
     try {
       console.log('=== Calling Agent (Public) ===');
+      console.log('Using wallet address:', walletAddress);
+
+      // Get the latest session or create a new one
+      const latestChat = await this.chatModel
+        .findOne({ walletAddress })
+        .sort({ createdAt: -1 });
+
+      const sessionId = latestChat?.sessionId || uuidv4();
+
+      // Save the user's message
+      await this.chatModel.findOneAndUpdate(
+        { walletAddress, sessionId },
+        {
+          $push: {
+            messages: {
+              role: 'user',
+              content: prompt,
+              chain,
+              timestamp: new Date(),
+            },
+          },
+        },
+        { upsert: true }, // Create if doesn't exist
+      );
+
       const apiKey = this.configService.get<string>('CROSSMINT_SERVER_API_KEY');
       const walletSignerSecretKey = this.configService.get<string>(
         'WALLET_SIGNER_SECRET_KEY',
@@ -483,8 +512,24 @@ export class AppService {
         prompt: prompt,
       });
 
+      // Save the assistant's response
+      await this.chatModel.findOneAndUpdate(
+        { walletAddress, sessionId },
+        {
+          $push: {
+            messages: {
+              role: 'assistant',
+              content: result.text,
+              chain,
+              timestamp: new Date(),
+            },
+          },
+        },
+      );
+
       return {
         response: result.text,
+        sessionId,
       };
     } catch (error) {
       console.error('Error in callAgentPublic:', error);
