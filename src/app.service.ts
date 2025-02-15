@@ -19,6 +19,7 @@ import { modeVoting } from '../workspace/goat-sdk/plugins/mode-voting/src';
 import { kim } from '../workspace/goat-sdk/plugins/kim/src';
 import { ironclad } from '../workspace/goat-sdk/plugins/ironclad/src';
 import { sendETH } from '@goat-sdk/wallet-evm';
+import { merchantMoe } from '../workspace/goat-sdk/plugins/merchant-moe/src';
 import { openai } from '@ai-sdk/openai';
 import { ChainType } from './dto/agent-call.dto';
 import { Model } from 'mongoose';
@@ -27,6 +28,10 @@ import { Chat } from './schemas/chat.schema';
 import { v4 as uuidv4 } from 'uuid';
 import { createCipheriv, randomBytes, createHash } from 'crypto';
 import { ApiKey } from './schemas/api-key.schema';
+import { createWalletClient, http } from 'viem';
+import { privateKeyToAccount } from 'viem/accounts';
+import { mantle } from 'viem/chains';
+import { viem } from '@goat-sdk/wallet-viem';
 
 @Injectable()
 export class AppService {
@@ -351,7 +356,6 @@ export class AppService {
           provider: alchemyApiKey,
         }),
         plugins: [
-          sendETH(),
           erc20({ tokens: [USDC, USDT, MODE, WETH, ezETH, wrsETH] }),
           modeVoting(),
           kim(),
@@ -495,7 +499,6 @@ export class AppService {
           provider: alchemyApiKey,
         }),
         plugins: [
-          sendETH(),
           erc20({ tokens: [USDC, USDT, MODE, WETH, ezETH, wrsETH] }),
           modeVoting(),
           kim(),
@@ -533,6 +536,53 @@ export class AppService {
       };
     } catch (error) {
       console.error('Error in callAgentPublic:', error);
+      throw new HttpException(
+        error.message || 'Failed to process agent request',
+        error.response?.status || 500,
+      );
+    }
+  }
+
+  async callAgentViem(prompt: string, chain: string, privateKey: string) {
+    try {
+      console.log('=== Calling Agent (Viem) ===');
+
+      // Normalize private key format
+      const normalizedPrivateKey = privateKey.startsWith('0x')
+        ? privateKey
+        : `0x${privateKey}`;
+      const account = privateKeyToAccount(
+        normalizedPrivateKey as `0x${string}`,
+      );
+
+      const walletClient = createWalletClient({
+        account: account as any,
+        transport: http(process.env.ALCHEMY_API_KEY_MANTLE),
+        chain: mantle as any,
+      });
+
+      const tools = await getOnChainTools({
+        wallet: viem(walletClient as any),
+        plugins: [
+          erc20({ tokens: [USDC, USDT, MODE, WETH, ezETH, wrsETH] }),
+          merchantMoe(),
+        ],
+      });
+
+      const result = await generateText({
+        model: openai('gpt-4o'),
+        tools: tools,
+        system:
+          'You name is Midas, named after the fabled King whose touch turned things to gold. As an agent, you are the best DeFi assistant there is who can do all types of DeFi actions like swapping, staking, voting, etc. When you are asked to do any action, search for the description which matches the action you are asked to do. If you find a match, use the tool to perform the action. Also, if a tool mentions to not call or call another tool in its description, make sure you follow the instructions. Send the data in a plain text format. NO MARKDOWN.',
+        maxSteps: 12,
+        prompt: prompt,
+      });
+
+      return {
+        response: result.text,
+      };
+    } catch (error) {
+      console.error('Error in callAgentViem:', error);
       throw new HttpException(
         error.message || 'Failed to process agent request',
         error.response?.status || 500,

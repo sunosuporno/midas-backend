@@ -17,6 +17,12 @@ import { SaveMessageDto } from './dto/save-message.dto';
 import { CrossmintJwtGuard } from './guards/jwt.guard';
 import { Public } from './decorators/public.decorator';
 
+export class AgentViemCallDto {
+  prompt: string;
+  chain: string;
+  privateKey: string;
+}
+
 @UseGuards(CrossmintJwtGuard)
 @Controller()
 export class AppController {
@@ -159,6 +165,20 @@ export class AppController {
         body.prompt,
         walletAddress,
         body.chain,
+      );
+    } catch (error) {
+      throw new HttpException(error.message, error.status || 500);
+    }
+  }
+
+  @Public()
+  @Post('call/agent/viem')
+  async callAgentViem(@Body() agentCallDto: AgentViemCallDto) {
+    try {
+      return await this.appService.callAgentViem(
+        agentCallDto.prompt,
+        agentCallDto.chain,
+        agentCallDto.privateKey,
       );
     } catch (error) {
       throw new HttpException(error.message, error.status || 500);
