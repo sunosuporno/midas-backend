@@ -7,7 +7,6 @@ import {
   ConvertToBaseUnitParameters,
   GetTokenAllowanceParameters,
   GetTokenBalanceParameters,
-  GetTokenInfoBySymbolParameters,
   GetTokenTotalSupplyParameters,
   RevokeApprovalParameters,
   TransferFromParameters,
@@ -22,39 +21,39 @@ export class Erc20Service {
     this.tokens = tokens ?? [];
   }
 
-  @Tool({
-    description:
-      'Get the ERC20 token info by its symbol, including the contract address, decimals, and name',
-  })
-  async getTokenInfoBySymbol(
-    walletClient: EVMWalletClient,
-    parameters: GetTokenInfoBySymbolParameters,
-  ) {
-    const token = this.tokens.find((token) =>
-      [token.symbol, token.symbol.toLowerCase()].includes(parameters.symbol),
-    );
+  // @Tool({
+  //   description:
+  //     'Get the ERC20 token info by its symbol, including the contract address, decimals, and name',
+  // })
+  // async getTokenInfoBySymbol(
+  //   walletClient: EVMWalletClient,
+  //   parameters: GetTokenInfoBySymbolParameters,
+  // ) {
+  //   const token = this.tokens.find((token) =>
+  //     [token.symbol, token.symbol.toLowerCase()].includes(parameters.symbol),
+  //   );
 
-    if (!token) {
-      throw Error(`Token with symbol ${parameters.symbol} not found`);
-    }
+  //   if (!token) {
+  //     throw Error(`Token with symbol ${parameters.symbol} not found`);
+  //   }
 
-    const chain = walletClient.getChain();
+  //   const chain = walletClient.getChain();
 
-    const contractAddress = token.chains[chain.id]?.contractAddress;
+  //   const contractAddress = token.chains[chain.id]?.contractAddress;
 
-    if (!contractAddress) {
-      throw Error(
-        `Token with symbol ${parameters.symbol} not found on chain ${chain.id}`,
-      );
-    }
+  //   if (!contractAddress) {
+  //     throw Error(
+  //       `Token with symbol ${parameters.symbol} not found on chain ${chain.id}`,
+  //     );
+  //   }
 
-    return {
-      symbol: token?.symbol,
-      contractAddress,
-      decimals: token?.decimals,
-      name: token?.name,
-    };
-  }
+  //   return {
+  //     symbol: token?.symbol,
+  //     contractAddress,
+  //     decimals: token?.decimals,
+  //     name: token?.name,
+  //   };
+  // }
 
   @Tool({
     description:
@@ -159,6 +158,7 @@ export class Erc20Service {
   }
 
   @Tool({
+    name: 'erc20_allowance',
     description: 'Get the allowance of an ERC20 token',
   })
   async getTokenAllowance(
@@ -182,10 +182,12 @@ export class Erc20Service {
   }
 
   @Tool({
+    name: 'erc20_approve',
     description: 'Approve an amount of an ERC20 token to an address',
   })
   async approve(walletClient: EVMWalletClient, parameters: ApproveParameters) {
     try {
+      console.log('approving', parameters);
       const spender = await walletClient.resolveAddress(parameters.spender);
 
       const hash = await walletClient.sendTransaction({
@@ -201,6 +203,7 @@ export class Erc20Service {
   }
 
   @Tool({
+    name: 'erc20_revoke_approval',
     description: 'Revoke approval for an ERC20 token to an address',
   })
   async revokeApproval(
@@ -223,6 +226,7 @@ export class Erc20Service {
   }
 
   @Tool({
+    name: 'erc20_transfer_from',
     description:
       'Transfer an amount of an ERC20 token from an address to another address',
   })
@@ -247,6 +251,7 @@ export class Erc20Service {
   }
 
   @Tool({
+    name: 'erc20_convert_to_base_unit',
     description: 'Convert an amount of an ERC20 token to its base unit',
   })
   async convertToBaseUnit(parameters: ConvertToBaseUnitParameters) {
@@ -256,6 +261,7 @@ export class Erc20Service {
   }
 
   @Tool({
+    name: 'erc20_convert_from_base_unit',
     description:
       'Convert an amount of an ERC20 token from its base unit to its decimal unit',
   })
