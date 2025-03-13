@@ -19,6 +19,7 @@ import { modeVoting } from '../workspace/goat-sdk/plugins/mode-voting/src';
 import { kim } from '../workspace/goat-sdk/plugins/kim/src';
 import { ironclad } from '../workspace/goat-sdk/plugins/ironclad/src';
 import { sendETH } from '@goat-sdk/wallet-evm';
+import { tokenInfo } from '../workspace/goat-sdk/plugins/token-info/src';
 import { merchantMoe } from '../workspace/goat-sdk/plugins/merchant-moe/src';
 import { openai } from '@ai-sdk/openai';
 import { ChainType } from './dto/agent-call.dto';
@@ -30,7 +31,7 @@ import { createCipheriv, randomBytes, createHash } from 'crypto';
 import { ApiKey } from './schemas/api-key.schema';
 import { createWalletClient, http } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
-import { mantle } from 'viem/chains';
+import { mantle, mode, base } from 'viem/chains';
 import { viem } from '@goat-sdk/wallet-viem';
 
 @Injectable()
@@ -543,9 +544,36 @@ export class AppService {
     }
   }
 
+  // Define a map for chain configurations
+  private readonly chainConfigMap: Record<
+    string,
+    { rpcUrl: string; chain: any }
+  > = {
+    mantle: {
+      rpcUrl: process.env.ALCHEMY_API_KEY_MANTLE,
+      chain: mantle,
+    },
+    mode: {
+      rpcUrl: process.env.ALCHEMY_API_KEY_MODE,
+      chain: mode,
+    },
+    base: {
+      rpcUrl: process.env.ALCHEMY_API_KEY_BASE,
+      chain: base,
+    },
+    // Add more chains as needed
+  };
+
   async callAgentViem(prompt: string, chain: string, privateKey: string) {
     try {
       console.log('=== Calling Agent (Viem) ===');
+      console.log('chain', chain);
+
+      // Get the chain configuration
+      const chainConfig = this.chainConfigMap[chain];
+      if (!chainConfig) {
+        throw new Error(`Unsupported chain: ${chain}`);
+      }
 
       // Normalize private key format
       const normalizedPrivateKey = privateKey.startsWith('0x')
@@ -557,14 +585,20 @@ export class AppService {
 
       const walletClient = createWalletClient({
         account: account as any,
-        transport: http(process.env.ALCHEMY_API_KEY_MANTLE),
-        chain: mantle as any,
+        transport: http(chainConfig.rpcUrl),
+        chain: chainConfig.chain as any,
       });
+
+      console.log('running');
+      console.log(this.configService.get<string>('COINGECKO_API_KEY'));
 
       const tools = await getOnChainTools({
         wallet: viem(walletClient as any),
         plugins: [
-          erc20({ tokens: [USDC, USDT, MODE, WETH, ezETH, wrsETH] }),
+          tokenInfo({
+            coingeckoApiKey:
+              this.configService.get<string>('COINGECKO_API_KEY'),
+          }),
           merchantMoe(),
         ],
       });

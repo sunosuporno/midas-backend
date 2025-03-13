@@ -1,1 +1,1 @@
-export * from "./token-info.plugin";
+export * from './token-info.plugin';
