@@ -56,6 +56,7 @@ export class Erc20Service {
   // }
 
   @Tool({
+    name: 'erc20_balance',
     description:
       'Get the balance of an ERC20 token in base units and its USD value.',
   })
@@ -116,6 +117,7 @@ export class Erc20Service {
   }
 
   @Tool({
+    name: 'erc20_transfer',
     description: 'Transfer an amount of an ERC20 token to an address',
   })
   async transfer(
@@ -138,6 +140,7 @@ export class Erc20Service {
   }
 
   @Tool({
+    name: 'erc20_total_supply',
     description: 'Get the total supply of an ERC20 token',
   })
   async getTokenTotalSupply(

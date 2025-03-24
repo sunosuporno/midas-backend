@@ -21,6 +21,7 @@ import { ironclad } from '../workspace/goat-sdk/plugins/ironclad/src';
 import { sendETH } from '@goat-sdk/wallet-evm';
 import { tokenInfo } from '../workspace/goat-sdk/plugins/token-info/src';
 import { merchantMoe } from '../workspace/goat-sdk/plugins/merchant-moe/src';
+import { zeroEx } from '../workspace/goat-sdk/plugins/0x/src';
 import { openai } from '@ai-sdk/openai';
 import { ChainType } from './dto/agent-call.dto';
 import { Model } from 'mongoose';
@@ -364,34 +365,54 @@ export class AppService {
         ],
       });
 
-      const result = await generateText({
-        model: openai('gpt-4o'),
-        tools: tools,
-        system:
-          'You name is Midas, named after the fabled King whose touch turned things to gold. As an agent, you are the best DeFi assistant there is who can do all types of DeFi actions like swapping, staking, voting, etc. When you are asked to do any action, search for the description which matches the action you are asked to do. If you find a match, use the tool to perform the action. Also, if a tool mentions to not call or call another tool in its description, make sure you follow the instructions. Send the data in a plain text format with heading on top and ',
-        maxSteps: 12,
-        prompt: prompt,
-      });
-      console.log('chain:', chain);
-      // Save the conversation
-      if (sessionId) {
-        await this.chatModel.findOneAndUpdate(
-          { walletAddress, sessionId },
-          {
-            $push: {
-              messages: {
-                role: 'assistant',
-                content: result.text,
-                chain,
-                timestamp: new Date(),
+      console.log('\n-------------------\n');
+      console.log('TOOLS CALLED');
+      console.log('\n-------------------\n');
+      try {
+        const result = await generateText({
+          model: openai('gpt-4o'),
+          tools: tools,
+          system:
+            'You name is Midas, named after the fabled King whose touch turned things to gold. As an agent, you are the best DeFi assistant there is who can do all types of DeFi actions like swapping, staking, voting, etc. When you are asked to do any action, search for the description which matches the action you are asked to do. If you find a match, use the tool to perform the action. Also, if a tool mentions to not call or call another tool in its description, make sure you follow the instructions. Send the data in a plain text format. NO MARKDOWN.',
+          maxSteps: 12,
+          prompt: prompt,
+          onStepFinish: (event) => {
+            console.log(event.toolResults);
+          },
+        });
+
+        console.log('\n-------------------\n');
+        console.log('RESPONSE');
+        console.log('\n-------------------\n');
+        console.log(result.text);
+        console.log('\n-------------------\n');
+
+        // Save the conversation
+        if (sessionId) {
+          await this.chatModel.findOneAndUpdate(
+            { walletAddress, sessionId },
+            {
+              $push: {
+                messages: {
+                  role: 'assistant',
+                  content: result.text,
+                  chain,
+                  timestamp: new Date(),
+                },
               },
             },
-          },
+          );
+        }
+        return {
+          response: result.text,
+        };
+      } catch (error) {
+        console.error('Error in generateText:', error);
+        throw new HttpException(
+          error.message || 'Failed to process agent request',
+          error.response?.status || 500,
         );
       }
-      return {
-        response: result.text,
-      };
     } catch (error) {
       console.error('Error in callAgent:', error);
       throw new HttpException(
@@ -507,34 +528,54 @@ export class AppService {
         ],
       });
 
-      const result = await generateText({
-        model: openai('gpt-4o'),
-        tools: tools,
-        system:
-          'You name is Midas, named after the fabled King whose touch turned things to gold. As an agent, you are the best DeFi assistant there is who can do all types of DeFi actions like swapping, staking, voting, etc. When you are asked to do any action, search for the description which matches the action you are asked to do. If you find a match, use the tool to perform the action. Also, if a tool mentions to not call or call another tool in its description, make sure you follow the instructions. Send the data in a plain text format. NO MARKDOWN.',
-        maxSteps: 12,
-        prompt: prompt,
-      });
+      console.log('\n-------------------\n');
+      console.log('TOOLS CALLED');
+      console.log('\n-------------------\n');
+      try {
+        const result = await generateText({
+          model: openai('gpt-4o'),
+          tools: tools,
+          system:
+            'You name is Midas, named after the fabled King whose touch turned things to gold. As an agent, you are the best DeFi assistant there is who can do all types of DeFi actions like swapping, staking, voting, etc. When you are asked to do any action, search for the description which matches the action you are asked to do. If you find a match, use the tool to perform the action. Also, if a tool mentions to not call or call another tool in its description, make sure you follow the instructions. Send the data in a plain text format. NO MARKDOWN.',
+          maxSteps: 12,
+          prompt: prompt,
+          onStepFinish: (event) => {
+            console.log(event.toolResults);
+          },
+        });
 
-      // Save the assistant's response
-      await this.chatModel.findOneAndUpdate(
-        { walletAddress, sessionId },
-        {
-          $push: {
-            messages: {
-              role: 'assistant',
-              content: result.text,
-              chain,
-              timestamp: new Date(),
+        console.log('\n-------------------\n');
+        console.log('RESPONSE');
+        console.log('\n-------------------\n');
+        console.log(result.text);
+        console.log('\n-------------------\n');
+
+        // Save the assistant's response
+        await this.chatModel.findOneAndUpdate(
+          { walletAddress, sessionId },
+          {
+            $push: {
+              messages: {
+                role: 'assistant',
+                content: result.text,
+                chain,
+                timestamp: new Date(),
+              },
             },
           },
-        },
-      );
+        );
 
-      return {
-        response: result.text,
-        sessionId,
-      };
+        return {
+          response: result.text,
+          sessionId,
+        };
+      } catch (error) {
+        console.error('Error in generateText:', error);
+        throw new HttpException(
+          error.message || 'Failed to process agent request',
+          error.response?.status || 500,
+        );
+      }
     } catch (error) {
       console.error('Error in callAgentPublic:', error);
       throw new HttpException(
@@ -583,6 +624,8 @@ export class AppService {
         normalizedPrivateKey as `0x${string}`,
       );
 
+      console.log('RPC URL:', chainConfig.rpcUrl);
+
       const walletClient = createWalletClient({
         account: account as any,
         transport: http(chainConfig.rpcUrl),
@@ -599,22 +642,46 @@ export class AppService {
             coingeckoApiKey:
               this.configService.get<string>('COINGECKO_API_KEY'),
           }),
+          zeroEx({
+            apiKey: this.configService.get<string>('0X_API_KEY'),
+          }),
           merchantMoe(),
+          erc20({ tokens: [USDC, USDT, MODE, WETH, ezETH, wrsETH] }),
         ],
       });
 
-      const result = await generateText({
-        model: openai('gpt-4o'),
-        tools: tools,
-        system:
-          'You name is Midas, named after the fabled King whose touch turned things to gold. As an agent, you are the best DeFi assistant there is who can do all types of DeFi actions like swapping, staking, voting, etc. When you are asked to do any action, search for the description which matches the action you are asked to do. If you find a match, use the tool to perform the action. Also, if a tool mentions to not call or call another tool in its description, make sure you follow the instructions. Send the data in a plain text format. NO MARKDOWN.',
-        maxSteps: 12,
-        prompt: prompt,
-      });
+      console.log('\n-------------------\n');
+      console.log('TOOLS CALLED');
+      console.log('\n-------------------\n');
+      try {
+        const result = await generateText({
+          model: openai('gpt-4o'),
+          tools: tools,
+          system:
+            'You name is Midas, named after the fabled King whose touch turned things to gold. As an agent, you are the best DeFi assistant there is who can do all types of DeFi actions like swapping, staking, voting, etc. When you are asked to do any action, search for the description which matches the action you are asked to do. If you find a match, use the tool to perform the action. Also, if a tool mentions to not call or call another tool in its description, make sure you follow the instructions. Send the data in a plain text format. NO MARKDOWN.',
+          maxSteps: 12,
+          prompt: prompt,
+          onStepFinish: (event) => {
+            console.log(event.toolResults);
+          },
+        });
 
-      return {
-        response: result.text,
-      };
+        console.log('\n-------------------\n');
+        console.log('RESPONSE');
+        console.log('\n-------------------\n');
+        console.log(result.text);
+        console.log('\n-------------------\n');
+
+        return {
+          response: result.text,
+        };
+      } catch (error) {
+        console.error('Error in generateText:', error);
+        throw new HttpException(
+          error.message || 'Failed to process agent request',
+          error.response?.status || 500,
+        );
+      }
     } catch (error) {
       console.error('Error in callAgentViem:', error);
       throw new HttpException(
