@@ -329,6 +329,30 @@ export class AppService {
   ) {
     try {
       console.log('=== Calling Agent ===');
+
+      // Fetch chat history if sessionId is provided
+      let contextualPrompt = prompt;
+      if (sessionId) {
+        const chatHistory = await this.chatModel.findOne({
+          walletAddress,
+          sessionId,
+        });
+        if (chatHistory && chatHistory.messages.length > 0) {
+          // Format previous messages into a conversation context
+          const MAX_PREVIOUS_MESSAGES = 5; // Adjust this number as needed
+          const recentMessages = chatHistory.messages
+            .slice(-MAX_PREVIOUS_MESSAGES) // Take only the most recent messages
+            .map(
+              (msg) =>
+                `${msg.role === 'user' ? 'User' : 'Assistant'}: ${msg.content}`,
+            )
+            .join('\n');
+
+          // Combine context with new prompt
+          contextualPrompt = `Previous conversation:\n${recentMessages}\n\nNew message: ${prompt}`;
+        }
+      }
+
       const apiKey = this.configService.get<string>('CROSSMINT_SERVER_API_KEY');
       const walletSignerSecretKey = this.configService.get<string>(
         'WALLET_SIGNER_SECRET_KEY',
@@ -375,7 +399,7 @@ export class AppService {
           system:
             'You name is Midas, named after the fabled King whose touch turned things to gold. As an agent, you are the best DeFi assistant there is who can do all types of DeFi actions like swapping, staking, voting, etc. When you are asked to do any action, search for the description which matches the action you are asked to do. If you find a match, use the tool to perform the action. Also, if a tool mentions to not call or call another tool in its description, make sure you follow the instructions. Send the data in a plain text format. NO MARKDOWN.',
           maxSteps: 12,
-          prompt: prompt,
+          prompt: contextualPrompt,
           onStepFinish: (event) => {
             console.log(event.toolResults);
           },
@@ -476,6 +500,21 @@ export class AppService {
 
       const sessionId = latestChat?.sessionId || uuidv4();
 
+      // Format chat history if it exists
+      let contextualPrompt = prompt;
+      if (latestChat && latestChat.messages.length > 0) {
+        const MAX_PREVIOUS_MESSAGES = 5;
+        const recentMessages = latestChat.messages
+          .slice(-MAX_PREVIOUS_MESSAGES)
+          .map(
+            (msg) =>
+              `${msg.role === 'user' ? 'User' : 'Assistant'}: ${msg.content}`,
+          )
+          .join('\n');
+
+        contextualPrompt = `Previous conversation:\n${recentMessages}\n\nNew message: ${prompt}`;
+      }
+
       // Save the user's message
       await this.chatModel.findOneAndUpdate(
         { walletAddress, sessionId },
@@ -489,7 +528,7 @@ export class AppService {
             },
           },
         },
-        { upsert: true }, // Create if doesn't exist
+        { upsert: true },
       );
 
       const apiKey = this.configService.get<string>('CROSSMINT_SERVER_API_KEY');
@@ -538,7 +577,7 @@ export class AppService {
           system:
             'You name is Midas, named after the fabled King whose touch turned things to gold. As an agent, you are the best DeFi assistant there is who can do all types of DeFi actions like swapping, staking, voting, etc. When you are asked to do any action, search for the description which matches the action you are asked to do. If you find a match, use the tool to perform the action. Also, if a tool mentions to not call or call another tool in its description, make sure you follow the instructions. Send the data in a plain text format. NO MARKDOWN.',
           maxSteps: 12,
-          prompt: prompt,
+          prompt: contextualPrompt,
           onStepFinish: (event) => {
             console.log(event.toolResults);
           },
