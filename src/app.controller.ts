@@ -12,7 +12,7 @@ import { AppService } from './app.service';
 import { CreateDelegatedKeyDto } from './dto/create-delegated-key.dto';
 // import { CreateWalletDto } from './dto/create-wallet.dto';
 import { ApproveDelegateDto } from './dto/approve-delegate.dto';
-import { AgentCallDto } from './dto/agent-call.dto';
+import { AgentCallDto, AgentCallViemDto } from './dto/agent-call.dto';
 import { SaveMessageDto } from './dto/save-message.dto';
 import { CrossmintJwtGuard } from './guards/jwt.guard';
 import { Public } from './decorators/public.decorator';
@@ -152,19 +152,15 @@ export class AppController {
   @Post('call/agent/public')
   async callAgentPublic(
     @Headers('x-api-key') apiKey: string,
-    @Body()
-    body: {
-      prompt: string;
-      chain: string;
-    },
+    @Body() agentCallDto: AgentCallDto,
   ) {
     try {
       const walletAddress = await this.appService.validateApiKey(apiKey);
       console.log('Using wallet address:', walletAddress);
       return await this.appService.callAgentPublic(
-        body.prompt,
+        agentCallDto.prompt,
         walletAddress,
-        body.chain,
+        agentCallDto.chain,
       );
     } catch (error) {
       throw new HttpException(error.message, error.status || 500);
@@ -173,12 +169,12 @@ export class AppController {
 
   @Public()
   @Post('call/agent/viem')
-  async callAgentViem(@Body() agentCallDto: AgentViemCallDto) {
+  async callAgentViem(@Body() agentCallViemDto: AgentCallViemDto) {
     try {
       return await this.appService.callAgentViem(
-        agentCallDto.prompt,
-        agentCallDto.chain,
-        agentCallDto.privateKey,
+        agentCallViemDto.prompt,
+        agentCallViemDto.chain,
+        agentCallViemDto.privateKey,
       );
     } catch (error) {
       throw new HttpException(error.message, error.status || 500);

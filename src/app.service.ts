@@ -22,8 +22,9 @@ import { sendETH } from '@goat-sdk/wallet-evm';
 import { tokenInfo } from '../workspace/goat-sdk/plugins/token-info/src';
 import { merchantMoe } from '../workspace/goat-sdk/plugins/merchant-moe/src';
 import { zeroEx } from '../workspace/goat-sdk/plugins/0x/src';
+import { odos } from '../workspace/goat-sdk/plugins/Odos/src';
 import { openai } from '@ai-sdk/openai';
-import { ChainType } from './dto/agent-call.dto';
+import { ChainType, SmartWalletChainType } from './dto/agent-call.dto';
 import { Model } from 'mongoose';
 import { InjectModel } from '@nestjs/mongoose';
 import { Chat } from './schemas/chat.schema';
@@ -34,6 +35,9 @@ import { createWalletClient, http } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import { mantle, mode, base } from 'viem/chains';
 import { viem } from '@goat-sdk/wallet-viem';
+import { networkTools } from './config/network-tools.config';
+import { isSmartWalletChain } from './config/chains.config';
+import { SupportedChainType } from './config/chains.config';
 
 @Injectable()
 export class AppService {
@@ -321,14 +325,112 @@ export class AppService {
     return this.chatModel.findOne({ walletAddress, sessionId });
   }
 
+  private getCapabilitiesResponse(
+    chain: ChainType,
+    detailed: boolean = false,
+  ): string {
+    const networkConfig = networkTools[chain];
+    if (!networkConfig) {
+      return `I'm sorry, I don't have information about my capabilities on this network.`;
+    }
+
+    const availableTools = networkConfig.available;
+    const descriptions = networkConfig.descriptions;
+
+    let response = `I'm Midas, your DeFi assistant on the ${chain.toUpperCase()} network! Here's what I can help you with:\n\n`;
+
+    if (!detailed) {
+      // Basic capabilities list
+      response += availableTools
+        .map((tool) => `• ${descriptions[tool].basic}`)
+        .join('\n');
+      response +=
+        '\n\nFor more details about any specific feature, just ask! For example: "How do I swap tokens?" or "How does voting work?"';
+    } else {
+      // Detailed capabilities for all tools
+      availableTools.forEach((tool) => {
+        response += `\n📌 ${descriptions[tool].basic}:\n`;
+        Object.entries(descriptions[tool].details).forEach(
+          ([, explanation]) => {
+            response += `   • ${explanation}\n`;
+          },
+        );
+      });
+    }
+
+    return response;
+  }
+
+  private getToolHelp(chain: ChainType, query: string): string | null {
+    const networkConfig = networkTools[chain];
+    if (!networkConfig) return null;
+
+    // Map common questions to tools
+    const toolMatches = {
+      swap: 'zeroEx',
+      exchange: 'zeroEx',
+      trade: 'zeroEx',
+      vote: 'modeVoting',
+      proposal: 'modeVoting',
+      governance: 'modeVoting',
+      balance: 'erc20',
+      transfer: 'erc20',
+      send: 'erc20',
+      stake: 'kim',
+      deposit: 'ironclad',
+      withdraw: 'ironclad',
+      price: 'tokenInfo',
+      market: 'tokenInfo',
+      pool: 'merchantMoe',
+    };
+
+    // Find which tool the question is about
+    const matchedTool = Object.entries(toolMatches).find(([key]) =>
+      query.toLowerCase().includes(key),
+    )?.[1];
+
+    if (!matchedTool || !networkConfig.available.includes(matchedTool)) {
+      return null;
+    }
+
+    const toolDesc = networkConfig.descriptions[matchedTool];
+    let response = `Here's how you can ${query.toLowerCase().includes('how') ? 'use' : 'work with'} ${matchedTool}:\n\n`;
+    Object.values(toolDesc.details).forEach((detail) => {
+      response += `• ${detail}\n`;
+    });
+
+    return response;
+  }
+
   async callAgent(
     prompt: string,
     walletAddress: string,
-    chain: ChainType,
+    chain: SmartWalletChainType,
     sessionId?: string,
   ) {
     try {
       console.log('=== Calling Agent ===');
+      console.log('Chain:', chain);
+      console.log('Wallet Address:', walletAddress);
+
+      if (!isSmartWalletChain(chain)) {
+        throw new HttpException(
+          'This chain does not support smart wallet operations',
+          400,
+        );
+      }
+
+      // Get the chain configuration
+      const chainConfig = this.chainConfigMap[chain];
+      if (!chainConfig) {
+        console.error('Unsupported chain:', chain);
+        throw new Error(`Unsupported chain: ${chain}`);
+      }
+      console.log('Chain Configuration:', {
+        chain: chain,
+        rpcUrl: chainConfig.rpcUrl,
+        chainObject: chainConfig.chain,
+      });
 
       // Fetch chat history if sessionId is provided
       let contextualPrompt = prompt;
@@ -357,9 +459,7 @@ export class AppService {
       const walletSignerSecretKey = this.configService.get<string>(
         'WALLET_SIGNER_SECRET_KEY',
       );
-      const alchemyApiKey = this.configService.get<string>(
-        'ALCHEMY_API_KEY_MODE',
-      );
+      const alchemyApiKey = chainConfig.rpcUrl; // Use chain-specific RPC URL
 
       if (
         !apiKey ||
@@ -367,10 +467,22 @@ export class AppService {
         !alchemyApiKey ||
         !walletAddress
       ) {
+        console.error('Missing configuration:', {
+          hasApiKey: !!apiKey,
+          hasSignerKey: !!walletSignerSecretKey,
+          hasAlchemyKey: !!alchemyApiKey,
+          hasWalletAddress: !!walletAddress,
+        });
         throw new Error('Missing required environment variables');
       }
 
       const { smartwallet } = crossmint(apiKey);
+
+      console.log('Creating smart wallet with configuration:', {
+        address: walletAddress,
+        chain: chain,
+        provider: alchemyApiKey,
+      });
 
       const tools = await getOnChainTools({
         wallet: await smartwallet({
@@ -378,13 +490,18 @@ export class AppService {
           signer: {
             secretKey: walletSignerSecretKey as `0x${string}`,
           },
-          chain,
+          chain: chain,
           provider: alchemyApiKey,
         }),
         plugins: [
+          tokenInfo({
+            coingeckoApiKey:
+              this.configService.get<string>('COINGECKO_API_KEY'),
+          }),
           erc20({ tokens: [USDC, USDT, MODE, WETH, ezETH, wrsETH] }),
-          modeVoting(),
-          kim(),
+          zeroEx({
+            apiKey: this.configService.get<string>('0X_API_KEY'),
+          }),
           ironclad(),
         ],
       });
@@ -397,7 +514,7 @@ export class AppService {
           model: openai('gpt-4o'),
           tools: tools,
           system:
-            'You name is Midas, named after the fabled King whose touch turned things to gold. As an agent, you are the best DeFi assistant there is who can do all types of DeFi actions like swapping, staking, voting, etc. When you are asked to do any action, search for the description which matches the action you are asked to do. If you find a match, use the tool to perform the action. Also, if a tool mentions to not call or call another tool in its description, make sure you follow the instructions. Send the data in a plain text format. NO MARKDOWN.',
+            'Your name is Midas, named after the fabled King whose touch turned things to gold. As an agent, you are the best DeFi assistant there is who can do all types of DeFi actions like swapping, staking, voting, etc. When you are asked to do any action, search the tools for the description which matches the action you are asked to do. If you find a match, use the tool to perform the action. Also, if a tool mentions to not call or call another tool in its description, make sure you follow the instructions. Send the data in markdown format.',
           maxSteps: 12,
           prompt: contextualPrompt,
           onStepFinish: (event) => {
@@ -438,7 +555,12 @@ export class AppService {
         );
       }
     } catch (error) {
-      console.error('Error in callAgent:', error);
+      console.error('Error in callAgent:', {
+        error: error.message,
+        stack: error.stack,
+        chain: chain,
+        walletAddress: walletAddress,
+      });
       throw new HttpException(
         error.message || 'Failed to process agent request',
         error.response?.status || 500,
@@ -488,10 +610,21 @@ export class AppService {
     }
   }
 
-  async callAgentPublic(prompt: string, walletAddress: string, chain: string) {
+  async callAgentPublic(
+    prompt: string,
+    walletAddress: string,
+    chain: SmartWalletChainType,
+  ) {
     try {
       console.log('=== Calling Agent (Public) ===');
       console.log('Using wallet address:', walletAddress);
+
+      if (!isSmartWalletChain(chain as ChainType)) {
+        throw new HttpException(
+          'This chain does not support smart wallet operations',
+          400,
+        );
+      }
 
       // Get the latest session or create a new one
       const latestChat = await this.chatModel
@@ -556,14 +689,18 @@ export class AppService {
           signer: {
             secretKey: walletSignerSecretKey as `0x${string}`,
           },
-          chain: chain as ChainType,
+          chain: chain,
           provider: alchemyApiKey,
         }),
         plugins: [
+          tokenInfo({
+            coingeckoApiKey:
+              this.configService.get<string>('COINGECKO_API_KEY'),
+          }),
+          zeroEx({
+            apiKey: this.configService.get<string>('0X_API_KEY'),
+          }),
           erc20({ tokens: [USDC, USDT, MODE, WETH, ezETH, wrsETH] }),
-          modeVoting(),
-          kim(),
-          ironclad(),
         ],
       });
 
@@ -575,7 +712,7 @@ export class AppService {
           model: openai('gpt-4o'),
           tools: tools,
           system:
-            'You name is Midas, named after the fabled King whose touch turned things to gold. As an agent, you are the best DeFi assistant there is who can do all types of DeFi actions like swapping, staking, voting, etc. When you are asked to do any action, search for the description which matches the action you are asked to do. If you find a match, use the tool to perform the action. Also, if a tool mentions to not call or call another tool in its description, make sure you follow the instructions. Send the data in a plain text format. NO MARKDOWN.',
+            'Your name is Midas, named after the fabled King whose touch turned things to gold. As an agent, you are the best DeFi assistant there is who can do all types of DeFi actions like swapping, staking, voting, etc. When you are asked to do any action, search the tools for the description which matches the action you are asked to do. If you find a match, use the tool to perform the action. Also, if a tool mentions to not call or call another tool in its description, make sure you follow the instructions. Send the data in markdown format.',
           maxSteps: 12,
           prompt: contextualPrompt,
           onStepFinish: (event) => {
@@ -644,7 +781,11 @@ export class AppService {
     // Add more chains as needed
   };
 
-  async callAgentViem(prompt: string, chain: string, privateKey: string) {
+  async callAgentViem(
+    prompt: string,
+    chain: SupportedChainType,
+    privateKey: string,
+  ) {
     try {
       console.log('=== Calling Agent (Viem) ===');
       console.log('chain', chain);
@@ -684,7 +825,6 @@ export class AppService {
           zeroEx({
             apiKey: this.configService.get<string>('0X_API_KEY'),
           }),
-          merchantMoe(),
           erc20({ tokens: [USDC, USDT, MODE, WETH, ezETH, wrsETH] }),
         ],
       });
@@ -697,7 +837,7 @@ export class AppService {
           model: openai('gpt-4o'),
           tools: tools,
           system:
-            'You name is Midas, named after the fabled King whose touch turned things to gold. As an agent, you are the best DeFi assistant there is who can do all types of DeFi actions like swapping, staking, voting, etc. When you are asked to do any action, search for the description which matches the action you are asked to do. If you find a match, use the tool to perform the action. Also, if a tool mentions to not call or call another tool in its description, make sure you follow the instructions. Send the data in a plain text format. NO MARKDOWN.',
+            'Your name is Midas, named after the fabled King whose touch turned things to gold. As an agent, you are the best DeFi assistant there is who can do all types of DeFi actions like swapping, staking, voting, etc. When you are asked to do any action, search the tools for the description which matches the action you are asked to do. If you find a match, use the tool to perform the action. Also, if a tool mentions to not call or call another tool in its description, make sure you follow the instructions. Send the data in markdown format.',
           maxSteps: 12,
           prompt: prompt,
           onStepFinish: (event) => {
