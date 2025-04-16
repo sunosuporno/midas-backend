@@ -15,12 +15,12 @@ import {
   erc20,
   MODE,
 } from '../workspace/goat-sdk/plugins/erc20/src';
-import { modeVoting } from '../workspace/goat-sdk/plugins/mode-voting/src';
-import { kim } from '../workspace/goat-sdk/plugins/kim/src';
+// import { modeVoting } from '../workspace/goat-sdk/plugins/mode-voting/src';
+// import { kim } from '../workspace/goat-sdk/plugins/kim/src';
 import { ironclad } from '../workspace/goat-sdk/plugins/ironclad/src';
-import { sendETH } from '@goat-sdk/wallet-evm';
+// import { sendETH } from '@goat-sdk/wallet-evm';
 import { tokenInfo } from '../workspace/goat-sdk/plugins/token-info/src';
-import { merchantMoe } from '../workspace/goat-sdk/plugins/merchant-moe/src';
+// import { merchantMoe } from '../workspace/goat-sdk/plugins/merchant-moe/src';
 import { zeroEx } from '../workspace/goat-sdk/plugins/0x/src';
 import { odos } from '../workspace/goat-sdk/plugins/Odos/src';
 import { openai } from '@ai-sdk/openai';
@@ -467,16 +467,10 @@ export class AppService {
         !alchemyApiKey ||
         !walletAddress
       ) {
-        console.error('Missing configuration:', {
-          hasApiKey: !!apiKey,
-          hasSignerKey: !!walletSignerSecretKey,
-          hasAlchemyKey: !!alchemyApiKey,
-          hasWalletAddress: !!walletAddress,
-        });
         throw new Error('Missing required environment variables');
       }
 
-      const { smartwallet } = crossmint(apiKey);
+      const { evmSmartWallet } = crossmint(apiKey);
 
       console.log('Creating smart wallet with configuration:', {
         address: walletAddress,
@@ -485,7 +479,7 @@ export class AppService {
       });
 
       const tools = await getOnChainTools({
-        wallet: await smartwallet({
+        wallet: await evmSmartWallet({
           address: walletAddress,
           signer: {
             secretKey: walletSignerSecretKey as `0x${string}`,
@@ -499,6 +493,7 @@ export class AppService {
               this.configService.get<string>('COINGECKO_API_KEY'),
           }),
           erc20({ tokens: [USDC, USDT, MODE, WETH, ezETH, wrsETH] }),
+          odos(),
           zeroEx({
             apiKey: this.configService.get<string>('0X_API_KEY'),
           }),
@@ -681,10 +676,10 @@ export class AppService {
         throw new Error('Missing required environment variables');
       }
 
-      const { smartwallet } = crossmint(apiKey);
+      const { evmSmartWallet } = crossmint(apiKey);
 
       const tools = await getOnChainTools({
-        wallet: await smartwallet({
+        wallet: await evmSmartWallet({
           address: walletAddress,
           signer: {
             secretKey: walletSignerSecretKey as `0x${string}`,
@@ -697,6 +692,7 @@ export class AppService {
             coingeckoApiKey:
               this.configService.get<string>('COINGECKO_API_KEY'),
           }),
+          odos(),
           zeroEx({
             apiKey: this.configService.get<string>('0X_API_KEY'),
           }),
@@ -822,6 +818,7 @@ export class AppService {
             coingeckoApiKey:
               this.configService.get<string>('COINGECKO_API_KEY'),
           }),
+          odos(),
           zeroEx({
             apiKey: this.configService.get<string>('0X_API_KEY'),
           }),

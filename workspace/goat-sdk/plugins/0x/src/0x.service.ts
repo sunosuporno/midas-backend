@@ -20,7 +20,6 @@ export class ZeroExService {
     path: string,
     queryParams: Record<string, string | undefined>,
   ) {
-    console.log('🔄 Making 0x API request:', { path, queryParams });
     const filteredParams = Object.fromEntries(
       Object.entries(queryParams).filter(([_, v]) => v !== undefined),
     ) as Record<string, string>;
@@ -29,7 +28,6 @@ export class ZeroExService {
       `https://api.0x.org${path}?${new URLSearchParams(filteredParams).toString()}`,
     );
 
-    console.log('📡 Sending request to:', url.toString());
     const response = await fetch(url.toString(), {
       method: 'GET',
       headers: {
@@ -39,20 +37,12 @@ export class ZeroExService {
     });
 
     if (!response.ok) {
-      const errorText = await response.text();
-      console.error('❌ 0x API request failed:', {
-        status: response.status,
-        statusText: response.statusText,
-        error: errorText,
-      });
       throw new Error(
-        `Failed to fetch ${url}: ${JSON.stringify(errorText, null, 2)}`,
+        `Failed to fetch ${url}: ${JSON.stringify(await response.text(), null, 2)}`,
       );
     }
 
-    const data = await response.json();
-    console.log('✅ 0x API response received:', data);
-    return data;
+    return response.json();
   }
 
   @Tool({
@@ -63,10 +53,6 @@ export class ZeroExService {
     walletClient: EVMWalletClient,
     parameters: GetPriceParameters,
   ) {
-    console.log('📊 Getting price quote:', {
-      chain: walletClient.getChain().id,
-      parameters,
-    });
     const queryParams = {
       chainId: walletClient.getChain().id.toString(),
       sellToken: parameters.sellToken,
@@ -90,28 +76,31 @@ export class ZeroExService {
     description: 'Swap tokens using 0x',
   })
   async swap(walletClient: EVMWalletClient, parameters: GetPriceParameters) {
-    console.log('🔄 Initiating token swap:', {
-      chain: walletClient.getChain().id,
-      parameters,
+    console.log('Starting swap operation with parameters:', {
+      sellToken: parameters.sellToken,
+      buyToken: parameters.buyToken,
+      sellAmount: parameters.sellAmount,
+      slippageBps: parameters.slippageBps,
     });
 
     const price = await this.getPrice(walletClient, parameters);
-    console.log('💰 Received price information:', price);
+    console.log('Received price information:', price);
 
     if (price.issues.allowance !== null) {
-      console.log('⚠️ Token approval needed:', {
-        spender: price.issues.allowance.spender,
-        amount: parameters.sellAmount,
-      });
-      const approveTx = await walletClient.sendTransaction({
+      console.log(
+        'Handling allowance approval for spender:',
+        price.issues.allowance.spender,
+      );
+      await walletClient.sendTransaction({
         to: parameters.sellToken,
         abi: erc20Abi,
         functionName: 'approve',
-        args: [price.issues.allowance.spender, parameters.sellAmount],
+        args: [price.issues.allowance.spender, maxUint256],
       });
-      console.log('✅ Approval transaction sent:', approveTx);
+      console.log('Allowance approval transaction sent');
     }
 
+    console.log('Requesting swap quote...');
     const quote = await this.makeRequest('/swap/permit2/quote', {
       chainId: walletClient.getChain().id.toString(),
       sellToken: parameters.sellToken,
@@ -126,21 +115,24 @@ export class ZeroExService {
         swapFeeRecipient: this.referrer.swapFeeRecipient,
       }),
     });
-    console.log('📝 Received swap quote:', quote);
+    console.log('Received swap quote:', quote);
 
     let signature: Hex | undefined;
 
     if (quote.permit2?.eip712) {
-      console.log('🔏 Signing permit2 message...');
+      console.log('EIP712 permit detected, generating signature...');
       signature = (
         await walletClient.signTypedData({
-          domain: quote.permit2.eip712.domain,
+          domain: {
+            ...quote.permit2.eip712.domain,
+            version: '1',
+          },
           types: quote.permit2.eip712.types,
           primaryType: quote.permit2.eip712.primaryType,
           message: quote.permit2.eip712.message,
         })
       ).signature as Hex;
-      console.log('✍️ Signature generated:', signature);
+      console.log('Generated signature:', signature);
 
       const signatureLengthInHex = numberToHex(size(signature), {
         signed: false,
@@ -152,11 +144,11 @@ export class ZeroExService {
       const sig = signature as Hex;
 
       quote.transaction.data = concat([transactionData, sigLengthHex, sig]);
-      console.log('📝 Updated transaction data with signature');
+      console.log('Updated transaction data with signature');
     }
 
     const transaction = quote.transaction;
-    console.log('📤 Sending swap transaction:', {
+    console.log('Sending final transaction:', {
       to: transaction.to,
       value: transaction.value,
       dataLength: transaction.data.length,
@@ -168,7 +160,7 @@ export class ZeroExService {
       data: transaction.data,
     });
 
-    console.log('✅ Swap transaction submitted:', tx.hash);
+    console.log('Swap transaction sent successfully with hash:', tx.hash);
     return tx.hash;
   }
 }

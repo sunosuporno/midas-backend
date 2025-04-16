@@ -65,9 +65,7 @@ export class Erc20Service {
     parameters: GetTokenBalanceParameters,
   ) {
     try {
-      const resolvedWalletAddress = await walletClient.resolveAddress(
-        parameters.wallet,
-      );
+      const resolvedWalletAddress = parameters.wallet as `0x${string}`;
 
       const rawBalance = await walletClient.read({
         address: parameters.tokenAddress,
@@ -125,7 +123,14 @@ export class Erc20Service {
     parameters: TransferParameters,
   ) {
     try {
-      const to = await walletClient.resolveAddress(parameters.to);
+      console.log('Starting ERC20 transfer:', {
+        tokenAddress: parameters.tokenAddress,
+        toAddress: parameters.to,
+        amount: parameters.amount.toString(),
+      });
+
+      const to = parameters.to as `0x${string}`;
+      console.log('Resolved recipient address:', to);
 
       const hash = await walletClient.sendTransaction({
         to: parameters.tokenAddress,
@@ -133,8 +138,22 @@ export class Erc20Service {
         functionName: 'transfer',
         args: [to, parameters.amount],
       });
+
+      console.log('ERC20 transfer successful:', {
+        transactionHash: hash.hash,
+        tokenAddress: parameters.tokenAddress,
+        to: to,
+        amount: parameters.amount.toString(),
+      });
+
       return hash.hash;
     } catch (error) {
+      console.error('ERC20 transfer failed:', {
+        tokenAddress: parameters.tokenAddress,
+        to: parameters.to,
+        amount: parameters.amount.toString(),
+        error: error.message,
+      });
       throw Error(`Failed to transfer: ${error}`);
     }
   }
@@ -169,8 +188,8 @@ export class Erc20Service {
     parameters: GetTokenAllowanceParameters,
   ) {
     try {
-      const owner = await walletClient.resolveAddress(parameters.owner);
-      const spender = await walletClient.resolveAddress(parameters.spender);
+      const owner = parameters.owner as `0x${string}`;
+      const spender = parameters.spender as `0x${string}`;
 
       const rawAllowance = await walletClient.read({
         address: parameters.tokenAddress,
@@ -191,7 +210,7 @@ export class Erc20Service {
   async approve(walletClient: EVMWalletClient, parameters: ApproveParameters) {
     try {
       console.log('approving', parameters);
-      const spender = await walletClient.resolveAddress(parameters.spender);
+      const spender = parameters.spender as `0x${string}`;
 
       const hash = await walletClient.sendTransaction({
         to: parameters.tokenAddress,
@@ -214,7 +233,7 @@ export class Erc20Service {
     parameters: RevokeApprovalParameters,
   ) {
     try {
-      const spender = await walletClient.resolveAddress(parameters.spender);
+      const spender = parameters.spender as `0x${string}`;
 
       const hash = await walletClient.sendTransaction({
         to: parameters.tokenAddress,
@@ -238,8 +257,9 @@ export class Erc20Service {
     parameters: TransferFromParameters,
   ) {
     try {
-      const from = await walletClient.resolveAddress(parameters.from);
-      const to = await walletClient.resolveAddress(parameters.to);
+      const from = parameters.from as `0x${string}`;
+      const to = parameters.to as `0x${string}`;
+
 
       const hash = await walletClient.sendTransaction({
         to: parameters.tokenAddress,
