@@ -7,26 +7,34 @@ export class Referrer {
   constructor(
     public readonly swapFeeBps: number,
     public readonly swapFeeRecipient: string,
-  ) {}
+  ) {
+    console.log('Initializing Referrer:', { swapFeeBps, swapFeeRecipient });
+  }
 }
 
 export class ZeroExService {
   constructor(
     private readonly apiKey: string,
     private readonly referrer?: Referrer,
-  ) {}
+  ) {
+    console.log('Initializing ZeroExService with referrer:', referrer);
+  }
 
   private async makeRequest(
     path: string,
     queryParams: Record<string, string | undefined>,
   ) {
+    console.log('Making request to 0x API:', { path, queryParams });
+
     const filteredParams = Object.fromEntries(
-      Object.entries(queryParams).filter(([_, v]) => v !== undefined),
+      Object.entries(queryParams).filter(([key, v]) => v !== undefined),
     ) as Record<string, string>;
 
     const url = new URL(
       `https://api.0x.org${path}?${new URLSearchParams(filteredParams).toString()}`,
     );
+
+    console.log('Request URL:', url.toString());
 
     const response = await fetch(url.toString(), {
       method: 'GET',
@@ -37,22 +45,38 @@ export class ZeroExService {
     });
 
     if (!response.ok) {
+      const errorText = await response.text();
+      console.error('0x API request failed:', {
+        status: response.status,
+        error: errorText,
+      });
       throw new Error(
-        `Failed to fetch ${url}: ${JSON.stringify(await response.text(), null, 2)}`,
+        `Failed to fetch ${url}: ${JSON.stringify(errorText, null, 2)}`,
       );
     }
 
-    return response.json();
+    const data = await response.json();
+    console.log('0x API response:', data);
+    return data;
   }
 
-  @Tool({
-    name: '0x_get_price',
-    description: 'Get the price of a token',
-  })
+  // @Tool({
+  //   name: '0x_get_price',
+  //   description:
+  //     "Get the price of a token (don't call this tool, it is called automatically)",
+  // })
   async getPrice(
     walletClient: EVMWalletClient,
     parameters: GetPriceParameters,
   ) {
+    console.log('Getting price with parameters:', {
+      chainId: walletClient.getChain().id,
+      sellToken: parameters.sellToken,
+      buyToken: parameters.buyToken,
+      sellAmount: parameters.sellAmount,
+      slippageBps: parameters.slippageBps,
+    });
+
     const queryParams = {
       chainId: walletClient.getChain().id.toString(),
       sellToken: parameters.sellToken,
@@ -68,7 +92,7 @@ export class ZeroExService {
       }),
     };
 
-    return await this.makeRequest('/swap/permit2/price', queryParams);
+    return await this.makeRequest('/swap/allowance-holder/price', queryParams);
   }
 
   @Tool({
@@ -101,7 +125,7 @@ export class ZeroExService {
     }
 
     console.log('Requesting swap quote...');
-    const quote = await this.makeRequest('/swap/permit2/quote', {
+    const quote = await this.makeRequest('/swap/allowance-holder/quote', {
       chainId: walletClient.getChain().id.toString(),
       sellToken: parameters.sellToken,
       buyToken: parameters.buyToken,
@@ -117,35 +141,35 @@ export class ZeroExService {
     });
     console.log('Received swap quote:', quote);
 
-    let signature: Hex | undefined;
+    // let signature: Hex | undefined;
 
-    if (quote.permit2?.eip712) {
-      console.log('EIP712 permit detected, generating signature...');
-      signature = (
-        await walletClient.signTypedData({
-          domain: {
-            ...quote.permit2.eip712.domain,
-            version: '1',
-          },
-          types: quote.permit2.eip712.types,
-          primaryType: quote.permit2.eip712.primaryType,
-          message: quote.permit2.eip712.message,
-        })
-      ).signature as Hex;
-      console.log('Generated signature:', signature);
+    // if (quote.permit2?.eip712) {
+    //   console.log('EIP712 permit detected, generating signature...');
+    //   signature = (
+    //     await walletClient.signTypedData({
+    //       domain: {
+    //         ...quote.permit2.eip712.domain,
+    //         version: '1',
+    //       },
+    //       types: quote.permit2.eip712.types,
+    //       primaryType: quote.permit2.eip712.primaryType,
+    //       message: quote.permit2.eip712.message,
+    //     })
+    //   ).signature as Hex;
+    //   console.log('Generated signature:', signature);
 
-      const signatureLengthInHex = numberToHex(size(signature), {
-        signed: false,
-        size: 32,
-      });
+    //   const signatureLengthInHex = numberToHex(size(signature), {
+    //     signed: false,
+    //     size: 32,
+    //   });
 
-      const transactionData = quote.transaction.data as Hex;
-      const sigLengthHex = signatureLengthInHex as Hex;
-      const sig = signature as Hex;
+    //   const transactionData = quote.transaction.data as Hex;
+    //   const sigLengthHex = signatureLengthInHex as Hex;
+    //   const sig = signature as Hex;
 
-      quote.transaction.data = concat([transactionData, sigLengthHex, sig]);
-      console.log('Updated transaction data with signature');
-    }
+    //   quote.transaction.data = concat([transactionData, sigLengthHex, sig]);
+    //   console.log('Updated transaction data with signature');
+    // }
 
     const transaction = quote.transaction;
     console.log('Sending final transaction:', {

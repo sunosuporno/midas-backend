@@ -66,7 +66,7 @@ export class Erc20Service {
   ) {
     try {
       const resolvedWalletAddress = parameters.wallet as `0x${string}`;
-
+      console.log('chain', walletClient.getChain());
       const rawBalance = await walletClient.read({
         address: parameters.tokenAddress,
         abi: ERC20_ABI,
@@ -259,7 +259,6 @@ export class Erc20Service {
     try {
       const from = parameters.from as `0x${string}`;
       const to = parameters.to as `0x${string}`;
-
 
       const hash = await walletClient.sendTransaction({
         to: parameters.tokenAddress,

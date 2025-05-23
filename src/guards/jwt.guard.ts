@@ -7,6 +7,7 @@ import {
 import { createCrossmint, CrossmintAuth } from '@crossmint/server-sdk';
 import { Reflector } from '@nestjs/core';
 import { IS_PUBLIC_KEY } from '../decorators/public.decorator';
+import { jwtDecode } from 'jwt-decode';
 
 @Injectable()
 export class CrossmintJwtGuard implements CanActivate {
@@ -45,6 +46,12 @@ export class CrossmintJwtGuard implements CanActivate {
       const token = authHeader.split(' ')[1];
       console.log('Token:', token.substring(0, 20) + '...');
 
+      // Check if JWT is expired before verifying
+      if (isJwtExpired(token)) {
+        console.log('❌ JWT expired');
+        throw new UnauthorizedException('Token expired');
+      }
+
       console.log('🔐 Verifying Crossmint JWT...');
       const decodedJwt = this.crossmintAuth.verifyCrossmintJwt(token);
 
@@ -63,7 +70,16 @@ export class CrossmintJwtGuard implements CanActivate {
     } catch (error) {
       console.error('\n❌ Token verification failed');
       console.error('Error details:', error);
+      // If the error is already an UnauthorizedException, rethrow it
+      if (error instanceof UnauthorizedException) {
+        throw error;
+      }
       throw new UnauthorizedException('Invalid token');
     }
   }
+}
+
+function isJwtExpired(token) {
+  const { exp } = jwtDecode(token) as { exp: number };
+  return Date.now() >= exp * 1000;
 }

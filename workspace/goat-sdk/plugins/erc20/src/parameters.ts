@@ -49,7 +49,11 @@ export class GetTokenAllowanceParameters extends createToolParameters(
 export class ApproveParameters extends createToolParameters(
   z.object({
     tokenAddress: z.string().describe('The address of the token to approve'),
-    spender: z.string().describe('The address to approve the allowance to'),
+    spender: z
+      .string()
+      .describe(
+        'The address to approve the allowance to (should be a contract address or an EOA address)',
+      ),
     amount: z
       .string()
       .describe('The amount of tokens to approve in base units'),

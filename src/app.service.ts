@@ -23,6 +23,7 @@ import { tokenInfo } from '../workspace/goat-sdk/plugins/token-info/src';
 // import { merchantMoe } from '../workspace/goat-sdk/plugins/merchant-moe/src';
 import { zeroEx } from '../workspace/goat-sdk/plugins/0x/src';
 import { odos } from '../workspace/goat-sdk/plugins/Odos/src';
+import { oneInch } from '../workspace/goat-sdk/plugins/1inch/src';
 import { openai } from '@ai-sdk/openai';
 import { ChainType, SmartWalletChainType } from './dto/agent-call.dto';
 import { Model } from 'mongoose';
@@ -38,12 +39,15 @@ import { viem } from '@goat-sdk/wallet-viem';
 import { networkTools } from './config/network-tools.config';
 import { isSmartWalletChain } from './config/chains.config';
 import { SupportedChainType } from './config/chains.config';
+import { User } from './schemas/user.schema';
+import { TwitterApi } from 'twitter-api-v2';
 
 @Injectable()
 export class AppService {
   constructor(
     @InjectModel(Chat.name) private chatModel: Model<Chat>,
     @InjectModel(ApiKey.name) private apiKeyModel: Model<ApiKey>,
+    @InjectModel(User.name) private userModel: Model<User>,
     private configService: ConfigService,
   ) {}
 
@@ -164,6 +168,41 @@ export class AppService {
         initialResponse.data.chains[createDelegatedKeyDto.chain];
       if (!chainAuth?.approvals?.pending?.[0]) {
         throw new HttpException('No pending approval found', 400);
+      }
+
+      // Handle user details if provided
+      if (createDelegatedKeyDto.userDetails) {
+        const { crossmintId, twitterId, wallet } =
+          createDelegatedKeyDto.userDetails;
+
+        // Check if this is the first chain being approved
+        const existingUser = await this.userModel.findOne({ crossmintId });
+
+        if (!existingUser) {
+          // Create new user
+          await this.userModel.create({
+            crossmintId,
+            twitterId,
+            wallet,
+            approvedChains: [createDelegatedKeyDto.chain],
+          });
+        } else {
+          // Update existing user's approved chains and optional fields
+          await this.userModel.updateOne(
+            { crossmintId },
+            {
+              $addToSet: { approvedChains: createDelegatedKeyDto.chain },
+              ...(twitterId && { twitterId }),
+              ...(wallet && { wallet }),
+            },
+          );
+        }
+      } else {
+        // If userDetails not present, update approvedChains by wallet address
+        await this.userModel.updateOne(
+          { wallet: walletLocator },
+          { $addToSet: { approvedChains: createDelegatedKeyDto.chain } },
+        );
       }
 
       const result = {
@@ -493,11 +532,14 @@ export class AppService {
               this.configService.get<string>('COINGECKO_API_KEY'),
           }),
           erc20({ tokens: [USDC, USDT, MODE, WETH, ezETH, wrsETH] }),
-          odos(),
+          // odos(),
           zeroEx({
             apiKey: this.configService.get<string>('0X_API_KEY'),
           }),
-          ironclad(),
+          // ironclad(),
+          // oneInch({
+          //   apiKey: this.configService.get<string>('1INCH_API_KEY'),
+          // }),
         ],
       });
 
@@ -613,13 +655,22 @@ export class AppService {
     try {
       console.log('=== Calling Agent (Public) ===');
       console.log('Using wallet address:', walletAddress);
+      console.log('chain', chain);
 
-      if (!isSmartWalletChain(chain as ChainType)) {
+      // Get the chain configuration
+      const chainConfig = this.chainConfigMap[chain];
+      if (!chainConfig) {
+        console.error('Unsupported chain:', chain);
         throw new HttpException(
           'This chain does not support smart wallet operations',
           400,
         );
       }
+      console.log('Chain Configuration:', {
+        chain: chain,
+        rpcUrl: chainConfig.rpcUrl,
+        chainObject: chainConfig.chain,
+      });
 
       // Get the latest session or create a new one
       const latestChat = await this.chatModel
@@ -663,9 +714,7 @@ export class AppService {
       const walletSignerSecretKey = this.configService.get<string>(
         'WALLET_SIGNER_SECRET_KEY',
       );
-      const alchemyApiKey = this.configService.get<string>(
-        'ALCHEMY_API_KEY_MODE',
-      );
+      const alchemyApiKey = chainConfig.rpcUrl; // Use chain-specific RPC URL
 
       if (
         !apiKey ||
@@ -675,6 +724,12 @@ export class AppService {
       ) {
         throw new Error('Missing required environment variables');
       }
+
+      console.log('Creating smart wallet with configuration:', {
+        address: walletAddress,
+        chain: chainConfig.chain,
+        provider: alchemyApiKey,
+      });
 
       const { evmSmartWallet } = crossmint(apiKey);
 
@@ -692,11 +747,13 @@ export class AppService {
             coingeckoApiKey:
               this.configService.get<string>('COINGECKO_API_KEY'),
           }),
-          odos(),
+          erc20({ tokens: [USDC, USDT, MODE, WETH, ezETH, wrsETH] }),
+          // oneInch({
+          //   apiKey: this.configService.get<string>('1INCH_API_KEY'),
+          // }),
           zeroEx({
             apiKey: this.configService.get<string>('0X_API_KEY'),
           }),
-          erc20({ tokens: [USDC, USDT, MODE, WETH, ezETH, wrsETH] }),
         ],
       });
 
@@ -749,7 +806,12 @@ export class AppService {
         );
       }
     } catch (error) {
-      console.error('Error in callAgentPublic:', error);
+      console.error('Error in callAgentPublic:', {
+        error: error.message,
+        stack: error.stack,
+        chain: chain,
+        walletAddress: walletAddress,
+      });
       throw new HttpException(
         error.message || 'Failed to process agent request',
         error.response?.status || 500,
@@ -818,9 +880,12 @@ export class AppService {
             coingeckoApiKey:
               this.configService.get<string>('COINGECKO_API_KEY'),
           }),
-          odos(),
-          zeroEx({
-            apiKey: this.configService.get<string>('0X_API_KEY'),
+          // odos(),
+          // zeroEx({
+          //   apiKey: this.configService.get<string>('0X_API_KEY'),
+          // }),
+          oneInch({
+            apiKey: this.configService.get<string>('1INCH_API_KEY'),
           }),
           erc20({ tokens: [USDC, USDT, MODE, WETH, ezETH, wrsETH] }),
         ],
@@ -865,5 +930,219 @@ export class AppService {
         error.response?.status || 500,
       );
     }
+  }
+
+  async callAgentTwitter(
+    tweets: { id: string; authorId: string; text: string }[],
+  ) {
+    try {
+      console.log('=== Processing Twitter Mentions Batch ===');
+      console.log('Number of tweets:', tweets.length);
+
+      // Initialize Twitter client with OAuth 1.0a for write actions (replies)
+      const twitterClient = new TwitterApi({
+        appKey: this.configService.get<string>('TWITTER_API_KEY'),
+        appSecret: this.configService.get<string>('TWITTER_API_SECRET'),
+        accessToken: this.configService.get<string>('TWITTER_ACCESS_TOKEN'),
+        accessSecret: this.configService.get<string>('TWITTER_ACCESS_SECRET'),
+      });
+
+      // Process each tweet
+      const results = await Promise.all(
+        tweets.map(async (tweet) => {
+          try {
+            // Find user by Twitter ID
+            const user = await this.userModel.findOne({
+              twitterId: tweet.authorId,
+            });
+            if (!user || !user.wallet) {
+              console.error(
+                `No wallet found for Twitter user ${tweet.authorId}`,
+              );
+              return null;
+            }
+
+            const walletAddress = user.wallet;
+
+            // Get the latest session or create a new one
+            const latestChat = await this.chatModel
+              .findOne({ walletAddress })
+              .sort({ createdAt: -1 });
+
+            const sessionId = latestChat?.sessionId || uuidv4();
+
+            // Format chat history if it exists
+            let contextualPrompt = tweet.text;
+            if (latestChat && latestChat.messages.length > 0) {
+              const MAX_PREVIOUS_MESSAGES = 5;
+              const recentMessages = latestChat.messages
+                .slice(-MAX_PREVIOUS_MESSAGES)
+                .map(
+                  (msg) =>
+                    `${msg.role === 'user' ? 'User' : 'Assistant'}: ${msg.content}`,
+                )
+                .join('\n');
+
+              contextualPrompt = `Previous conversation:\n${recentMessages}\n\nNew message: ${tweet.text}`;
+            }
+
+            // Save the user's message
+            await this.chatModel.findOneAndUpdate(
+              { walletAddress, sessionId },
+              {
+                $push: {
+                  messages: {
+                    role: 'user',
+                    content: tweet.text,
+                    chain: 'base',
+                    timestamp: new Date(),
+                  },
+                },
+              },
+              { upsert: true },
+            );
+
+            const apiKey = this.configService.get<string>(
+              'CROSSMINT_SERVER_API_KEY',
+            );
+            const walletSignerSecretKey = this.configService.get<string>(
+              'WALLET_SIGNER_SECRET_KEY',
+            );
+            const chainConfig = this.chainConfigMap['base'];
+            const alchemyApiKey = chainConfig.rpcUrl;
+
+            if (
+              !apiKey ||
+              !walletSignerSecretKey ||
+              !alchemyApiKey ||
+              !walletAddress
+            ) {
+              throw new Error('Missing required environment variables');
+            }
+
+            const { evmSmartWallet } = crossmint(apiKey);
+
+            const tools = await getOnChainTools({
+              wallet: await evmSmartWallet({
+                address: walletAddress,
+                signer: {
+                  secretKey: walletSignerSecretKey as `0x${string}`,
+                },
+                chain: 'base',
+                provider: alchemyApiKey,
+              }),
+              plugins: [
+                tokenInfo({
+                  coingeckoApiKey:
+                    this.configService.get<string>('COINGECKO_API_KEY'),
+                }),
+                erc20({ tokens: [USDC, USDT, MODE, WETH, ezETH, wrsETH] }),
+                zeroEx({
+                  apiKey: this.configService.get<string>('0X_API_KEY'),
+                }),
+                oneInch({
+                  apiKey: this.configService.get<string>('1INCH_API_KEY'),
+                }),
+              ],
+            });
+
+            const result = await generateText({
+              model: openai('gpt-4o'),
+              tools: tools,
+              system:
+                'Your name is Midas, named after the fabled King whose touch turned things to gold. As an agent, you are the best DeFi assistant there is who can do all types of DeFi actions like swapping, staking, voting, etc. When you are asked to do any action, search the tools for the description which matches the action you are asked to do. If you find a match, use the tool to perform the action. Also, if a tool mentions to not call or call another tool in its description, make sure you follow the instructions. Send the data in markdown format.',
+              maxSteps: 12,
+              prompt: contextualPrompt,
+              onStepFinish: (event) => {
+                console.log(event.toolResults);
+              },
+            });
+
+            // Post reply to the tweet
+            try {
+              // Format the response to fit Twitter's character limit
+              const formattedResponse = this.formatTwitterResponse(result.text);
+
+              // Post the reply
+              const reply = await twitterClient.v2.reply(
+                formattedResponse,
+                tweet.id,
+              );
+
+              console.log(`Posted reply to tweet ${tweet.id}:`, reply.data);
+
+              // Only save the assistant's response after successful Twitter reply
+              await this.chatModel.findOneAndUpdate(
+                { walletAddress, sessionId },
+                {
+                  $push: {
+                    messages: {
+                      role: 'assistant',
+                      content: result.text,
+                      chain: 'base',
+                      timestamp: new Date(),
+                    },
+                  },
+                },
+              );
+
+              return {
+                tweetId: tweet.id,
+                authorId: tweet.authorId,
+                response: result.text,
+                replyId: reply.data.id,
+                sessionId,
+                walletAddress,
+              };
+            } catch (replyError) {
+              console.error(
+                `Error posting reply to tweet ${tweet.id}:`,
+                replyError,
+              );
+              // Return the result without saving to chat history if reply fails
+              return {
+                tweetId: tweet.id,
+                authorId: tweet.authorId,
+                response: result.text,
+                replyError: replyError.message,
+                sessionId,
+                walletAddress,
+              };
+            }
+          } catch (error) {
+            console.error(`Error processing tweet ${tweet.id}:`, error);
+            return null;
+          }
+        }),
+      );
+
+      // Filter out failed processing attempts
+      const successfulResults = results.filter((result) => result !== null);
+
+      return {
+        processed: successfulResults.length,
+        total: tweets.length,
+        results: successfulResults,
+      };
+    } catch (error) {
+      console.error('Error in callAgentTwitter:', error);
+      throw new HttpException(
+        error.message || 'Failed to process agent request',
+        error.response?.status || 500,
+      );
+    }
+  }
+
+  private formatTwitterResponse(text: string): string {
+    // Remove markdown formatting
+    let formatted = text.replace(/[*_`#]/g, '');
+
+    // If response is too long, truncate it
+    const MAX_LENGTH = 280;
+    if (formatted.length > MAX_LENGTH) {
+      formatted = formatted.substring(0, MAX_LENGTH - 3) + '...';
+    }
+
+    return formatted;
   }
 }

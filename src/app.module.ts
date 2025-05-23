@@ -7,6 +7,9 @@ import { Chat, ChatSchema } from './schemas/chat.schema';
 import { JwtModule } from '@nestjs/jwt';
 import { CrossmintJwtGuard } from './guards/jwt.guard';
 import { ApiKey, ApiKeySchema } from './schemas/api-key.schema';
+// import { TwitterModule } from './twitter/twitter.module';
+import { MentionCronService } from './mention-cron.service';
+import { User, UserSchema } from './schemas/user.schema';
 
 @Module({
   imports: [
@@ -17,12 +20,14 @@ import { ApiKey, ApiKeySchema } from './schemas/api-key.schema';
     MongooseModule.forFeature([
       { name: Chat.name, schema: ChatSchema },
       { name: ApiKey.name, schema: ApiKeySchema },
+      { name: User.name, schema: UserSchema },
     ]),
     JwtModule.register({
       global: true,
     }),
+    // TwitterModule,
   ],
   controllers: [AppController],
-  providers: [AppService, CrossmintJwtGuard],
+  providers: [AppService, CrossmintJwtGuard, MentionCronService],
 })
 export class AppModule {}
