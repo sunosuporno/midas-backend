@@ -1050,7 +1050,7 @@ export class AppService {
               model: openai('gpt-4o'),
               tools: tools,
               system:
-                'Your name is Midas, named after the fabled King whose touch turned things to gold. As an agent, you are the best DeFi assistant there is who can do all types of DeFi actions like swapping, staking, voting, etc. When you are asked to do any action, search the tools for the description which matches the action you are asked to do. If you find a match, use the tool to perform the action. Also, if a tool mentions to not call or call another tool in its description, make sure you follow the instructions. Send the data in markdown format.',
+                'Your name is Midas, named after the fabled King whose touch turned things to gold. As an agent, you are the best DeFi assistant there is who can do all types of DeFi actions like swapping, staking, voting, etc. When you are asked to do any action, search the tools for the description which matches the action you are asked to do. If you find a match, use the tool to perform the action. Also, if a tool mentions to not call or call another tool in its description, make sure you follow the instructions. Be extremely, extremely careful with base units of each token, convert each token into its base units before performing swapping and other stuff. Send the data in markdown format.',
               maxSteps: 12,
               prompt: contextualPrompt,
               onStepFinish: (event) => {

@@ -17,7 +17,16 @@ export class ZeroExService {
     private readonly apiKey: string,
     private readonly referrer?: Referrer,
   ) {
-    console.log('Initializing ZeroExService with referrer:', referrer);
+    // Log the API key (partially masked for security)
+    const maskedApiKey = this.apiKey
+      ? this.apiKey.slice(0, 4) + '****' + this.apiKey.slice(-4)
+      : 'undefined';
+    console.log(
+      'Initializing ZeroExService with apiKey:',
+      maskedApiKey,
+      'and referrer:',
+      referrer,
+    );
   }
 
   private async makeRequest(
