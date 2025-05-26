@@ -17,13 +17,13 @@ import {
 } from '../workspace/goat-sdk/plugins/erc20/src';
 // import { modeVoting } from '../workspace/goat-sdk/plugins/mode-voting/src';
 // import { kim } from '../workspace/goat-sdk/plugins/kim/src';
-import { ironclad } from '../workspace/goat-sdk/plugins/ironclad/src';
+// import { ironclad } from '../workspace/goat-sdk/plugins/ironclad/src';
 // import { sendETH } from '@goat-sdk/wallet-evm';
 import { tokenInfo } from '../workspace/goat-sdk/plugins/token-info/src';
 // import { merchantMoe } from '../workspace/goat-sdk/plugins/merchant-moe/src';
 import { zeroEx } from '../workspace/goat-sdk/plugins/0x/src';
-import { odos } from '../workspace/goat-sdk/plugins/Odos/src';
-import { oneInch } from '../workspace/goat-sdk/plugins/1inch/src';
+// import { odos } from '../workspace/goat-sdk/plugins/Odos/src';
+// import { oneInch } from '../workspace/goat-sdk/plugins/1inch/src';
 import { openai } from '@ai-sdk/openai';
 import { ChainType, SmartWalletChainType } from './dto/agent-call.dto';
 import { Model } from 'mongoose';
@@ -884,9 +884,9 @@ export class AppService {
           // zeroEx({
           //   apiKey: this.configService.get<string>('0X_API_KEY'),
           // }),
-          oneInch({
-            apiKey: this.configService.get<string>('1INCH_API_KEY'),
-          }),
+          // oneInch({
+          //   apiKey: this.configService.get<string>('1INCH_API_KEY'),
+          // }),
           erc20({ tokens: [USDC, USDT, MODE, WETH, ezETH, wrsETH] }),
         ],
       });
@@ -1040,9 +1040,9 @@ export class AppService {
                 zeroEx({
                   apiKey: this.configService.get<string>('0X_API_KEY'),
                 }),
-                oneInch({
-                  apiKey: this.configService.get<string>('1INCH_API_KEY'),
-                }),
+                // oneInch({
+                //   apiKey: this.configService.get<string>('1INCH_API_KEY'),
+                // }),
               ],
             });
 
