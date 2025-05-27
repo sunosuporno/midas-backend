@@ -535,9 +535,9 @@ export class AppService {
           // odos(),
           zeroEx({
             apiKey: (() => {
-              const key = this.configService.get<string>('0X_API_KEY');
+              const key = this.configService.get<string>('ZEROX_API_KEY');
               console.log(
-                'Debug - 0X_API_KEY value:',
+                'Debug - ZEROX_API_KEY value:',
                 key ? 'present' : 'undefined',
               );
               return key;
@@ -759,7 +759,7 @@ export class AppService {
           //   apiKey: this.configService.get<string>('1INCH_API_KEY'),
           // }),
           zeroEx({
-            apiKey: this.configService.get<string>('0X_API_KEY'),
+            apiKey: this.configService.get<string>('ZEROX_API_KEY'),
           }),
         ],
       });
@@ -888,9 +888,9 @@ export class AppService {
               this.configService.get<string>('COINGECKO_API_KEY'),
           }),
           // odos(),
-          // zeroEx({
-          //   apiKey: this.configService.get<string>('0X_API_KEY'),
-          // }),
+          zeroEx({
+            apiKey: this.configService.get<string>('ZEROX_API_KEY'),
+          }),
           // oneInch({
           //   apiKey: this.configService.get<string>('1INCH_API_KEY'),
           // }),
@@ -1045,7 +1045,7 @@ export class AppService {
                 }),
                 erc20({ tokens: [USDC, USDT, MODE, WETH, ezETH, wrsETH] }),
                 zeroEx({
-                  apiKey: this.configService.get<string>('0X_API_KEY'),
+                  apiKey: this.configService.get<string>('ZEROX_API_KEY'),
                 }),
                 // oneInch({
                 //   apiKey: this.configService.get<string>('1INCH_API_KEY'),
