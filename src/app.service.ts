@@ -534,7 +534,14 @@ export class AppService {
           erc20({ tokens: [USDC, USDT, MODE, WETH, ezETH, wrsETH] }),
           // odos(),
           zeroEx({
-            apiKey: this.configService.get<string>('0X_API_KEY'),
+            apiKey: (() => {
+              const key = this.configService.get<string>('0X_API_KEY');
+              console.log(
+                'Debug - 0X_API_KEY value:',
+                key ? 'present' : 'undefined',
+              );
+              return key;
+            })(),
           }),
           // ironclad(),
           // oneInch({
