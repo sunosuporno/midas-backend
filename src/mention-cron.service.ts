@@ -107,6 +107,7 @@ export class MentionCronService implements OnModuleInit {
     // Schedule a task to run every 2 minutes
     cron.schedule('*/2 * * * *', async () => {
       try {
+        console.log('Running mention cron job');
         const botUsername = this.configService.get('TWITTER_BOT_USERNAME');
 
         // Get user ID for the bot username
@@ -126,6 +127,7 @@ export class MentionCronService implements OnModuleInit {
         if (tweets.length === 0) {
           return;
         }
+        console.log('tweets', tweets);
 
         // Get author IDs for all tweets
         const processedTweets = await this.getTweetAuthors(tweets);
