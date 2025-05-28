@@ -22,11 +22,7 @@ export class TokenInfoService {
     walletClient: EVMWalletClient,
     parameters: TokenInfoParameters,
   ): Promise<TokenInfo | null> {
-    logger.log('=== getTokenInfo called ===');
-    logger.log('Parameters:', parameters);
-
     const chainId = walletClient.getChain().id;
-    logger.log('Chain ID:', chainId);
 
     // First check known tokens
     const knownToken =
@@ -34,30 +30,15 @@ export class TokenInfoService {
         parameters.symbol.toUpperCase() as keyof typeof KNOWN_TOKENS
       ];
     if (knownToken) {
-      logger.log('Known token found:', knownToken);
-
       const chainData = knownToken.chains[chainId.toString()];
       if (chainData) {
-        logger.log('Returning known token info:', {
-          symbol: knownToken.symbol,
-          name: knownToken.name,
-          decimals: knownToken.decimals,
-          contractAddress: chainData.contractAddress,
-        });
-
         return {
           symbol: knownToken.symbol,
           name: knownToken.name,
           decimals: knownToken.decimals,
           contractAddress: chainData.contractAddress,
         };
-      } else {
-        logger.log(
-          'Token not available on current network, querying CoinGecko',
-        );
       }
-    } else {
-      logger.log('Token not found in known tokens, querying CoinGecko');
     }
 
     // Query CoinGecko if token is not found or not available on the current network
@@ -78,7 +59,6 @@ export class TokenInfoService {
         (token) =>
           token.symbol.toLowerCase() === parameters.symbol.toLowerCase(),
       );
-      logger.log('Matching tokens from CoinGecko:', matches);
 
       for (const token of matches) {
         const platformAddress = this.getPlatformAddressForChainId(
@@ -87,8 +67,6 @@ export class TokenInfoService {
         );
 
         if (platformAddress) {
-          logger.log('Platform address found:', platformAddress);
-
           const tokenDecimals = await walletClient.read({
             address: platformAddress as `0x${string}`,
             abi: ERC20_ABI,
@@ -96,8 +74,6 @@ export class TokenInfoService {
           });
           const tokenDecimalsParsed = (tokenDecimals as { value: number })
             .value;
-
-          logger.log('Token decimals:', tokenDecimalsParsed);
 
           return {
             symbol: token.symbol.toUpperCase(),
@@ -107,12 +83,8 @@ export class TokenInfoService {
           };
         }
       }
-      logger.log(
-        'No matching tokens found on CoinGecko for the current chain',
-      );
       return null;
-    } catch (error) {
-      logger.error('Error querying CoinGecko:', error);
+    } catch {
       return null;
     }
   }

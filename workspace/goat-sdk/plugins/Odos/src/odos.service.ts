@@ -34,16 +34,6 @@ export class OdosService {
     walletClient: EVMWalletClient,
     parameters: GetQuoteParameters,
   ) {
-    logger.log('=== Starting Odos GetQuote ===');
-    logger.log('Input Parameters:', {
-      sellToken: parameters.sellToken,
-      buyToken: parameters.buyToken,
-      sellAmount: parameters.sellAmount,
-      slippageLimitPercent: parameters.slippageLimitPercent || 1,
-      walletAddress: walletClient.getAddress(),
-      chainId: walletClient.getChain().id,
-    });
-
     const requestBody = {
       chainId: walletClient.getChain().id,
       inputTokens: [
@@ -64,22 +54,10 @@ export class OdosService {
       compact: true,
     };
 
-    logger.log('Request Body:', JSON.stringify(requestBody, null, 2));
-
     try {
       const quote = await this.makeRequest('/sor/quote/v2', requestBody);
-      logger.log('Quote Response:', {
-        success: true,
-        response: quote,
-      });
-      logger.log('=== Odos GetQuote Complete ===');
       return quote;
     } catch (error) {
-      logger.error('Error in Odos GetQuote:', {
-        error: error.message,
-        code: error.code,
-        requestBody: requestBody,
-      });
       throw error;
     }
   }
@@ -91,17 +69,6 @@ export class OdosService {
   async swap(walletClient: EVMWalletClient, parameters: GetQuoteParameters) {
     const quote = await this.getQuote(walletClient, parameters);
 
-    // // Check if approval is needed
-    // if (quote.approvalNeeded) {
-    //     await walletClient.sendTransaction({
-    //         to: quote.approvalNeeded.spender,
-    //         abi: erc20Abi,
-    //         functionName: "approve",
-    //         args: [quote.approvalNeeded.spender, maxUint256],
-    //     });
-    // }
-
-    // Assemble the transaction
     const assembleRequestBody = {
       userAddr: walletClient.getAddress(),
       pathId: quote.pathId,
@@ -114,9 +81,7 @@ export class OdosService {
     );
 
     const transaction = assembledTransaction.transaction;
-    logger.log('transaction', transaction);
 
-    logger.log('Sending approve');
     await walletClient.sendTransaction({
       to: quote.inTokens[0],
       abi: erc20Abi,
@@ -124,7 +89,6 @@ export class OdosService {
       args: [transaction.to, quote.inAmounts[0]],
     });
 
-    logger.log('Sending transaction');
     const tx = await walletClient.sendTransaction({
       to: transaction.to,
       data: transaction.data,

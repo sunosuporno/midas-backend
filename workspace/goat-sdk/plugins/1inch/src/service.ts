@@ -6,7 +6,7 @@ import {
   BalanceServiceParams,
   SwapResponse,
 } from './types';
-import { erc20Abi, MaxFeePerGasTooLowError, maxUint256 } from 'viem';
+import { erc20Abi, maxUint256 } from 'viem';
 
 export class OneInchService {
   private readonly baseUrl: string;
@@ -22,7 +22,7 @@ export class OneInchService {
     queryParams: Record<string, string | undefined> = {},
   ): Promise<T> {
     const filteredParams = Object.fromEntries(
-      Object.entries(queryParams).filter(([_, v]) => v !== undefined),
+      Object.entries(queryParams).filter(([, v]) => v !== undefined),
     ) as Record<string, string>;
 
     const url = new URL(`${this.baseUrl}${path}`);
@@ -91,17 +91,12 @@ export class OneInchService {
     parameters: SwapParameters,
   ): Promise<string> {
     const chainId = walletClient.getChain().id;
-    logger.log('Chain ID:', chainId);
     const fromAddress = walletClient.getAddress();
 
-    // Get the spender address first
-    logger.log('Getting spender address...');
     const spenderResponse = await this.makeRequest<{ address: string }>(
       `/swap/v6.0/${chainId}/approve/spender`,
     );
-    logger.log('Spender address:', spenderResponse.address);
 
-    logger.log('Approving token...');
     await walletClient.sendTransaction({
       to: parameters.fromTokenAddress,
       abi: erc20Abi,
@@ -109,8 +104,6 @@ export class OneInchService {
       args: [spenderResponse.address, maxUint256],
     });
 
-    // Get the swap transaction data
-    logger.log('Getting swap transaction data...');
     const swapParams = {
       src: parameters.fromTokenAddress,
       dst: parameters.toTokenAddress,
@@ -123,15 +116,11 @@ export class OneInchService {
     const swapResponse = await this.makeRequest<{
       tx: { to: string; data: string; value: string };
     }>(`/swap/v6.0/${chainId}/swap`, swapParams);
-    logger.log('Swap transaction data received');
 
-    // Execute the swap
-    logger.log('Executing swap transaction...');
     const tx = await walletClient.sendTransaction({
       to: swapResponse.tx.to,
       data: swapResponse.tx.data as `0x${string}`,
     });
-    logger.log('Swap transaction sent:', tx.hash);
 
     return tx.hash;
   }

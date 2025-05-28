@@ -11,9 +11,6 @@ import { TROVE_MANAGER_ABI } from './abi/troveManager';
 import {
   BorrowIUSDParameters,
   CalculateMaxWithdrawableParameters,
-  GetBorrowerAddressParameters,
-  GetIcVaultParameters,
-  GetLendingPoolAddressParameters,
   LoopDepositParameters,
   LoopWithdrawParameters,
   MonitorPositionParameters,
@@ -161,10 +158,6 @@ export class IroncladService {
     parameters: LoopWithdrawParameters,
   ): Promise<string> {
     try {
-      logger.log('\n=== Starting Loop Withdrawal ===');
-      logger.log('Asset Address:', parameters.assetAddress);
-      logger.log('User Address:', walletClient.getAddress());
-
       const userReserveDataResult = await walletClient.read({
         address: PROTOCOL_DATA_PROVIDER_ADDRESS as `0x${string}`,
         abi: PROTOCOL_DATA_PROVIDER_ABI,
@@ -178,21 +171,17 @@ export class IroncladService {
         bigint,
       ];
       let remainingDebt = userReserveData[2]; // currentVariableDebt
-      logger.log('Initial Debt:', remainingDebt.toString());
 
       let withdrawalCount = 1;
       while (remainingDebt > 0n) {
-        logger.log(`\n--- Processing Withdrawal Loop ${withdrawalCount} ---`);
         const maxWithdrawable = await this.calculateMaxWithdrawableAmount(
           walletClient,
           {
             assetAddress: parameters.assetAddress,
           },
         );
-        logger.log('Max Withdrawable Amount:', maxWithdrawable.toString());
 
         if (maxWithdrawable === 0n) {
-          logger.error('Cannot withdraw: Health factor limit reached');
           throw new Error(
             'Cannot withdraw any more funds while maintaining health factor',
           );
@@ -202,9 +191,7 @@ export class IroncladService {
           remainingDebt === 0n
             ? maxWithdrawable
             : (maxWithdrawable * 995n) / 1000n;
-        logger.log('Withdrawal Amount:', withdrawAmount.toString());
 
-        logger.log('Executing withdrawal...');
         await walletClient.sendTransaction({
           to: LENDING_POOL_ADDRESS,
           abi: LENDING_POOL_ABI,
@@ -223,10 +210,8 @@ export class IroncladService {
           args: [walletClient.getAddress(), LENDING_POOL_ADDRESS],
         });
         const allowance = (allowanceResult as { value: bigint }).value;
-        logger.log('Current Allowance:', allowance.toString());
 
         if (allowance < withdrawAmount) {
-          logger.log('Approving tokens for repayment...');
           await walletClient.sendTransaction({
             to: parameters.assetAddress,
             abi: ERC20_ABI,
@@ -235,7 +220,6 @@ export class IroncladService {
           });
         }
 
-        logger.log('Executing repayment...');
         await walletClient.sendTransaction({
           to: LENDING_POOL_ADDRESS,
           abi: LENDING_POOL_ABI,
@@ -256,11 +240,9 @@ export class IroncladService {
         });
 
         remainingDebt = (updatedReserveData.value as any)[2];
-        logger.log('Remaining Debt:', remainingDebt.toString());
         withdrawalCount++;
       }
 
-      logger.log('\n=== Checking Final Position ===');
       const finalReserveData = await walletClient.read({
         address: PROTOCOL_DATA_PROVIDER_ADDRESS as `0x${string}`,
         abi: PROTOCOL_DATA_PROVIDER_ABI,
@@ -268,10 +250,8 @@ export class IroncladService {
         args: [parameters.assetAddress, walletClient.getAddress()],
       });
       const remainingDeposit = (finalReserveData.value as any)[0];
-      logger.log('Remaining Deposit:', remainingDeposit.toString());
 
       if (remainingDeposit > 0n) {
-        logger.log('Withdrawing remaining deposits...');
         await walletClient.sendTransaction({
           to: LENDING_POOL_ADDRESS,
           abi: LENDING_POOL_ABI,
@@ -284,10 +264,8 @@ export class IroncladService {
         });
       }
 
-      logger.log('\n=== Loop Withdrawal Complete ===');
       return `Successfully unwound position in ${withdrawalCount - 1} loops`;
     } catch (error) {
-      logger.error('Loop Withdrawal Failed:', error);
       throw Error(`Failed to execute loop withdraw: ${error}`);
     }
   }
@@ -307,10 +285,6 @@ export class IroncladService {
     liquidationThreshold: string;
   }> {
     try {
-      logger.log('\n=== Monitoring Loop Position ===');
-      logger.log('Asset Address:', parameters.tokenAddress);
-      logger.log('User Address:', walletClient.getAddress());
-
       // Get token decimals
       const decimalsResult = await walletClient.read({
         address: parameters.tokenAddress as `0x${string}`,
@@ -318,10 +292,8 @@ export class IroncladService {
         functionName: 'decimals',
       });
       const decimals = Number((decimalsResult as { value: number }).value);
-      logger.log('Token Decimals:', decimals);
 
       // Get user's reserve data
-      logger.log('\n--- Fetching User Reserve Data ---');
       const userReserveDataResult = await walletClient.read({
         address: PROTOCOL_DATA_PROVIDER_ADDRESS as `0x${string}`,
         abi: PROTOCOL_DATA_PROVIDER_ABI,
@@ -333,14 +305,8 @@ export class IroncladService {
         bigint,
         bigint,
       ];
-      logger.log('Raw User Reserve Data:', {
-        aTokenBalance: userReserveData[0].toString(),
-        stableDebt: userReserveData[1].toString(),
-        variableDebt: userReserveData[2].toString(),
-      });
 
       // Get reserve configuration
-      logger.log('\n--- Fetching Reserve Configuration ---');
       const reserveConfigResult = await walletClient.read({
         address: PROTOCOL_DATA_PROVIDER_ADDRESS as `0x${string}`,
         abi: PROTOCOL_DATA_PROVIDER_ABI,
@@ -352,27 +318,13 @@ export class IroncladService {
         bigint,
         bigint,
       ];
-      logger.log('Raw Reserve Config:', {
-        ltv: reserveConfig[1].toString(),
-        liquidationThreshold: reserveConfig[2].toString(),
-      });
 
       // Parse position data
-      logger.log('\n--- Calculating Position Metrics ---');
       const totalCollateral = formatUnits(userReserveData[0], decimals);
       const totalBorrowed = formatUnits(userReserveData[2], decimals);
       const liquidationThreshold = Number(reserveConfig[2]) / 10000;
 
-      logger.log('Position Data:', {
-        rawCollateral: userReserveData[0].toString(),
-        formattedCollateral: totalCollateral,
-        rawBorrowed: userReserveData[2].toString(),
-        formattedBorrowed: totalBorrowed,
-        liquidationThreshold: `${(liquidationThreshold * 100).toFixed(2)}%`,
-      });
-
       // Calculate risk metrics
-      logger.log('\n--- Computing Risk Metrics ---');
       const currentLTV =
         totalBorrowed === '0'
           ? '0'
@@ -388,24 +340,6 @@ export class IroncladService {
               Number(totalBorrowed)
             ).toFixed(2);
 
-      logger.log('Risk Metrics:', {
-        currentLTV: `${currentLTV}%`,
-        healthFactor,
-        liquidationThreshold: `${(liquidationThreshold * 100).toFixed(2)}%`,
-      });
-
-      logger.log('\n--- Position Summary ---');
-      logger.log('Total Collateral:', totalCollateral);
-      logger.log('Total Borrowed:', totalBorrowed);
-      logger.log('Current LTV:', `${currentLTV}%`);
-      logger.log('Health Factor:', healthFactor);
-      logger.log(
-        'Liquidation Threshold:',
-        `${(liquidationThreshold * 100).toFixed(2)}%`,
-      );
-
-      logger.log('\n=== Loop Position Monitoring Complete ===');
-
       return {
         totalCollateral,
         totalBorrowed,
@@ -414,9 +348,73 @@ export class IroncladService {
         liquidationThreshold: `${(liquidationThreshold * 100).toFixed(2)}%`,
       };
     } catch (error) {
-      logger.error('\n❌ Error Monitoring Loop Position ❌');
-      logger.error('Error Details:', error);
       throw Error(`Failed to monitor loop position: ${error}`);
+    }
+  }
+
+  @Tool({
+    name: 'calculate_max_withdrawable_ironclad',
+    description:
+      'Calculate maximum withdrawable amount while maintaining health factor',
+  })
+  async calculateMaxWithdrawableAmount(
+    walletClient: EVMWalletClient,
+    parameters: CalculateMaxWithdrawableParameters,
+  ): Promise<bigint> {
+    try {
+      const asset = parameters.assetAddress;
+
+      // Get user's reserve data
+      const userReserveDataResult = await walletClient.read({
+        address: PROTOCOL_DATA_PROVIDER_ADDRESS as `0x${string}`,
+        abi: PROTOCOL_DATA_PROVIDER_ABI,
+        functionName: 'getUserReserveData',
+        args: [asset, walletClient.getAddress()],
+      });
+
+      const userReserveData = userReserveDataResult.value as [
+        bigint,
+        bigint,
+        bigint,
+      ];
+
+      // Get reserve configuration
+      const reserveConfigResult = await walletClient.read({
+        address: PROTOCOL_DATA_PROVIDER_ADDRESS as `0x${string}`,
+        abi: PROTOCOL_DATA_PROVIDER_ABI,
+        functionName: 'getReserveConfigurationData',
+        args: [asset],
+      });
+
+      const reserveConfig = reserveConfigResult.value as [
+        bigint,
+        bigint,
+        bigint,
+      ];
+
+      const currentATokenBalance = userReserveData[0]; // Current collateral
+      const currentVariableDebt = userReserveData[2]; // Current debt
+      const liquidationThreshold = reserveConfig[2]; // In basis points (e.g., 8500 = 85%)
+
+      if (currentVariableDebt === 0n) {
+        return currentATokenBalance; // Can withdraw everything if no debt
+      }
+
+      // To maintain HF >= 1, we need:
+      // (collateral * liquidationThreshold) / debt >= 1
+      // So: collateral >= debt / (liquidationThreshold/10000)
+      const minRequiredCollateral =
+        (currentVariableDebt * 10000n) / liquidationThreshold;
+
+      if (currentATokenBalance <= minRequiredCollateral) {
+        return 0n; // Cannot withdraw anything
+      }
+
+      const maxWithdrawable = currentATokenBalance - minRequiredCollateral;
+
+      return maxWithdrawable;
+    } catch (error) {
+      throw error;
     }
   }
 
@@ -622,177 +620,18 @@ export class IroncladService {
   }
 
   @Tool({
-    name: 'calculate_max_withdrawable_ironclad',
-    description:
-      'Calculate maximum withdrawable amount while maintaining health factor',
-  })
-  async calculateMaxWithdrawableAmount(
-    walletClient: EVMWalletClient,
-    parameters: CalculateMaxWithdrawableParameters,
-  ): Promise<bigint> {
-    try {
-      logger.log('\n=== Calculating Max Withdrawable Amount ===');
-      const asset = parameters.assetAddress;
-
-      // Get token decimals
-      const decimalsResult = await walletClient.read({
-        address: asset as `0x${string}`,
-        abi: ERC20_ABI,
-        functionName: 'decimals',
-      });
-      const decimals = Number((decimalsResult as { value: number }).value);
-      logger.log('Token Decimals:', decimals);
-
-      // Get user's reserve data
-      const userReserveDataResult = await walletClient.read({
-        address: PROTOCOL_DATA_PROVIDER_ADDRESS as `0x${string}`,
-        abi: PROTOCOL_DATA_PROVIDER_ABI,
-        functionName: 'getUserReserveData',
-        args: [asset, walletClient.getAddress()],
-      });
-
-      const userReserveData = userReserveDataResult.value as [
-        bigint,
-        bigint,
-        bigint,
-      ];
-      logger.log('User Reserve Data:', {
-        aTokenBalance: formatUnits(userReserveData[0], decimals),
-        stableDebt: formatUnits(userReserveData[1], decimals),
-        variableDebt: formatUnits(userReserveData[2], decimals),
-      });
-
-      // Get reserve configuration
-      const reserveConfigResult = await walletClient.read({
-        address: PROTOCOL_DATA_PROVIDER_ADDRESS as `0x${string}`,
-        abi: PROTOCOL_DATA_PROVIDER_ABI,
-        functionName: 'getReserveConfigurationData',
-        args: [asset],
-      });
-
-      const reserveConfig = reserveConfigResult.value as [
-        bigint,
-        bigint,
-        bigint,
-      ];
-      logger.log('Reserve Config:', {
-        ltv: `${Number(reserveConfig[1]) / 100}%`,
-        liquidationThreshold: `${Number(reserveConfig[2]) / 100}%`,
-      });
-
-      const currentATokenBalance = userReserveData[0]; // Current collateral
-      const currentVariableDebt = userReserveData[2]; // Current debt
-      const liquidationThreshold = reserveConfig[2]; // In basis points (e.g., 8500 = 85%)
-
-      logger.log('Current State:', {
-        balance: formatUnits(currentATokenBalance, decimals),
-        debt: formatUnits(currentVariableDebt, decimals),
-        threshold: `${Number(liquidationThreshold) / 100}%`,
-      });
-
-      if (currentVariableDebt === 0n) {
-        logger.log(
-          'No debt, can withdraw full balance:',
-          formatUnits(currentATokenBalance, decimals),
-        );
-        return currentATokenBalance; // Can withdraw everything if no debt
-      }
-
-      // To maintain HF >= 1, we need:
-      // (collateral * liquidationThreshold) / debt >= 1
-      // So: collateral >= debt / (liquidationThreshold/10000)
-      const minRequiredCollateral =
-        (currentVariableDebt * 10000n) / liquidationThreshold;
-      logger.log(
-        'Minimum Required Collateral:',
-        formatUnits(minRequiredCollateral, decimals),
-      );
-
-      if (currentATokenBalance <= minRequiredCollateral) {
-        logger.log('Cannot withdraw: balance <= required collateral');
-        return 0n; // Cannot withdraw anything
-      }
-
-      const maxWithdrawable = currentATokenBalance - minRequiredCollateral;
-      logger.log(
-        'Max Withdrawable Amount:',
-        formatUnits(maxWithdrawable, decimals),
-      );
-
-      return maxWithdrawable;
-    } catch (error) {
-      logger.error('Error calculating max withdrawable amount:', error);
-      throw error;
-    }
-  }
-
-  private async getHints(
-    walletClient: EVMWalletClient,
-    collateral: string,
-    collateralAmount: bigint,
-    debt: bigint,
-  ): Promise<{ upperHint: string; lowerHint: string }> {
-    const decimals = (
-      await walletClient.read({
-        address: collateral,
-        abi: ERC20_ABI,
-        functionName: 'decimals',
-      })
-    ).value;
-
-    const troveCount = (
-      await walletClient.read({
-        address: TROVE_MANAGER_ADDRESS,
-        abi: TROVE_MANAGER_ABI,
-        functionName: 'getTroveOwnersCount',
-        args: [collateral],
-      })
-    ).value;
-
-    const numTrials = Math.ceil(15 * Math.sqrt(Number(troveCount)));
-    const NICR = (
-      await walletClient.read({
-        address: HINT_HELPERS_ADDRESS,
-        abi: HINT_HELPERS_ABI,
-        functionName: 'computeNominalCR',
-        args: [collateralAmount, debt, decimals],
-      })
-    ).value;
-
-    const randomSeed = Math.floor(Math.random() * 1000000);
-
-    const result = await walletClient.read({
-      address: HINT_HELPERS_ADDRESS,
-      abi: HINT_HELPERS_ABI,
-      functionName: 'getApproxHint',
-      args: [collateral, NICR, numTrials, randomSeed],
-    });
-
-    // The function returns (address hintAddress, uint diff, uint latestRandomSeed)
-    const [hintAddress] = (result as { value: [`0x${string}`, bigint, bigint] })
-      .value;
-
-    return {
-      upperHint: hintAddress,
-      lowerHint: '0x0000000000000000000000000000000000000000', // zero address
-    };
-  }
-
-  @Tool({
     name: 'get_ic_vault_ironclad',
     description:
-      'Get the corresponding ic-vault address for a token. Use this before approving tokens for deposit.',
+      'Get the IC Vault contract address for a token. Use this address to approve tokens for deposit.',
   })
   async getIcVault(
     walletClient: EVMWalletClient,
-    parameters: GetIcVaultParameters,
+    parameters: { tokenAddress: string },
   ): Promise<string> {
     try {
-      const vaultAddress = getVaultAddress(parameters.tokenAddress);
-
-      return vaultAddress;
+      return getVaultAddress(parameters.tokenAddress);
     } catch (error) {
-      throw Error(`Failed to get ic-vault address: ${error}`);
+      throw Error(`Failed to get IC vault address: ${error}`);
     }
   }
 
@@ -801,10 +640,7 @@ export class IroncladService {
     description:
       'Get the Borrower contract address. Use this before approving ic-tokens to deposit into Borrow contract to get iUSD.',
   })
-  async getBorrowerAddress(
-    walletClient: EVMWalletClient,
-    parameters: GetBorrowerAddressParameters,
-  ): Promise<string> {
+  async getBorrowerAddress(): Promise<string> {
     try {
       return BORROWER_ADDRESS;
     } catch (error) {
@@ -817,10 +653,7 @@ export class IroncladService {
     description:
       'Get the Lending Pool contract address. Use this address to approve tokens for looped deposit.',
   })
-  async getLendingPoolAddress(
-    walletClient: EVMWalletClient,
-    parameters: GetLendingPoolAddressParameters,
-  ): Promise<string> {
+  async getLendingPoolAddress(): Promise<string> {
     try {
       return LENDING_POOL_ADDRESS;
     } catch (error) {
@@ -838,25 +671,15 @@ export class IroncladService {
     parameters: DepositParameters,
   ): Promise<string> {
     try {
-      logger.log('📥 Starting deposit process...');
-      logger.log('Parameters:', {
-        asset: parameters.assetAddress,
-        amount: parameters.amount,
-        referralCode: parameters.referralCode,
-      });
-
       // First approve the lending pool to spend tokens
-      logger.log('🔓 Approving tokens...');
-      const approvalTx = await walletClient.sendTransaction({
+      await walletClient.sendTransaction({
         to: parameters.assetAddress as `0x${string}`,
         abi: ERC20_ABI,
         functionName: 'approve',
         args: [LENDING_POOL_ADDRESS, parameters.amount],
       });
-      logger.log('✅ Approval transaction:', approvalTx.hash);
 
       // Execute deposit
-      logger.log('💰 Executing deposit...');
       const depositTx = await walletClient.sendTransaction({
         to: LENDING_POOL_ADDRESS,
         abi: LENDING_POOL_ABI,
@@ -869,10 +692,8 @@ export class IroncladService {
         ],
       });
 
-      logger.log('✅ Deposit successful!');
       return depositTx.hash;
     } catch (error) {
-      logger.error('❌ Deposit failed:', error);
       throw Error(`Failed to deposit: ${error}`);
     }
   }
@@ -887,13 +708,6 @@ export class IroncladService {
     parameters: BorrowParameters,
   ): Promise<string> {
     try {
-      logger.log('📤 Starting borrow process...');
-      logger.log('Parameters:', {
-        asset: parameters.assetAddress,
-        amount: parameters.amount,
-        interestRateMode: parameters.interestRateMode,
-      });
-
       const borrowTx = await walletClient.sendTransaction({
         to: LENDING_POOL_ADDRESS,
         abi: LENDING_POOL_ABI,
@@ -907,10 +721,8 @@ export class IroncladService {
         ],
       });
 
-      logger.log('✅ Borrow successful!');
       return borrowTx.hash;
     } catch (error) {
-      logger.error('❌ Borrow failed:', error);
       throw Error(`Failed to borrow: ${error}`);
     }
   }
@@ -925,12 +737,9 @@ export class IroncladService {
     parameters: WithdrawParameters,
   ): Promise<string> {
     try {
-      logger.log('💸 Starting withdrawal process...');
-
       // Get full balance if amount not specified
       let withdrawAmount = parameters.amount;
       if (!withdrawAmount) {
-        logger.log('Amount not specified, fetching full balance...');
         const userReserveData = await walletClient.read({
           address: PROTOCOL_DATA_PROVIDER_ADDRESS as `0x${string}`,
           abi: PROTOCOL_DATA_PROVIDER_ABI,
@@ -938,13 +747,7 @@ export class IroncladService {
           args: [parameters.assetAddress, walletClient.getAddress()],
         });
         withdrawAmount = (userReserveData as any).value[0].toString(); // aToken balance
-        logger.log('Full balance to withdraw:', withdrawAmount);
       }
-
-      logger.log('Parameters:', {
-        asset: parameters.assetAddress,
-        amount: withdrawAmount,
-      });
 
       const withdrawTx = await walletClient.sendTransaction({
         to: LENDING_POOL_ADDRESS,
@@ -957,10 +760,8 @@ export class IroncladService {
         ],
       });
 
-      logger.log('✅ Withdrawal successful!');
       return withdrawTx.hash;
     } catch (error) {
-      logger.error('❌ Withdrawal failed:', error);
       throw Error(`Failed to withdraw: ${error}`);
     }
   }
@@ -975,12 +776,9 @@ export class IroncladService {
     parameters: RepayParameters,
   ): Promise<string> {
     try {
-      logger.log('💰 Starting repayment process...');
-
       // Get current debt if amount not specified
       let repayAmount = parameters.amount;
       if (!repayAmount) {
-        logger.log('Amount not specified, fetching current debt...');
         const userReserveData = await walletClient.read({
           address: PROTOCOL_DATA_PROVIDER_ADDRESS as `0x${string}`,
           abi: PROTOCOL_DATA_PROVIDER_ABI,
@@ -988,24 +786,15 @@ export class IroncladService {
           args: [parameters.assetAddress, walletClient.getAddress()],
         });
         repayAmount = (userReserveData as any).value[2].toString(); // variableDebt
-        logger.log('Current debt to repay:', repayAmount);
       }
 
-      logger.log('Parameters:', {
-        asset: parameters.assetAddress,
-        amount: repayAmount,
-        interestRateMode: parameters.interestRateMode,
-      });
-
       // First approve the lending pool to spend tokens
-      logger.log('🔓 Approving tokens for repayment...');
-      const approvalTx = await walletClient.sendTransaction({
+      await walletClient.sendTransaction({
         to: parameters.assetAddress as `0x${string}`,
         abi: ERC20_ABI,
         functionName: 'approve',
         args: [LENDING_POOL_ADDRESS, repayAmount],
       });
-      logger.log('✅ Approval transaction:', approvalTx.hash);
 
       const repayTx = await walletClient.sendTransaction({
         to: LENDING_POOL_ADDRESS,
@@ -1019,10 +808,8 @@ export class IroncladService {
         ],
       });
 
-      logger.log('✅ Repayment successful!');
       return repayTx.hash;
     } catch (error) {
-      logger.error('❌ Repayment failed:', error);
       throw Error(`Failed to repay: ${error}`);
     }
   }
@@ -1042,10 +829,6 @@ export class IroncladService {
     availableToBorrow: string;
   }> {
     try {
-      logger.log('\n=== Monitoring Lending Position ===');
-      logger.log('Asset Address:', parameters.assetAddress);
-      logger.log('User Address:', walletClient.getAddress());
-
       // Get token decimals first
       const decimalsResult = await walletClient.read({
         address: parameters.assetAddress as `0x${string}`,
@@ -1054,10 +837,8 @@ export class IroncladService {
       });
       const decimals = Number((decimalsResult as { value: number }).value);
       const decimalsBigInt = BigInt(10 ** decimals);
-      logger.log('Token Decimals:', decimals);
 
       // Get user's reserve data
-      logger.log('\n--- Fetching User Reserve Data ---');
       const userReserveData = await walletClient.read({
         address: PROTOCOL_DATA_PROVIDER_ADDRESS as `0x${string}`,
         abi: PROTOCOL_DATA_PROVIDER_ABI,
@@ -1066,7 +847,6 @@ export class IroncladService {
       });
 
       // Get reserve configuration
-      logger.log('\n--- Fetching Reserve Configuration ---');
       const reserveConfig = await walletClient.read({
         address: PROTOCOL_DATA_PROVIDER_ADDRESS as `0x${string}`,
         abi: PROTOCOL_DATA_PROVIDER_ABI,
@@ -1079,11 +859,6 @@ export class IroncladService {
       const borrowed = (userReserveData as any).value[2];
       const ltv = Number((reserveConfig as any).value[1]) / 10000; // Convert basis points to percentage
 
-      logger.log('\n--- Position Details ---');
-      logger.log('Raw Deposited:', deposited.toString());
-      logger.log('Raw Borrowed:', borrowed.toString());
-      logger.log('LTV Ratio:', `${(ltv * 100).toFixed(2)}%`);
-
       // Calculate health factor and current LTV
       const healthFactor =
         borrowed === 0n
@@ -1095,29 +870,12 @@ export class IroncladService {
           ? '0'
           : ((Number(borrowed) / Number(deposited)) * 100).toFixed(2);
 
-      logger.log('\n--- Risk Metrics ---');
-      logger.log('Health Factor:', healthFactor);
-      logger.log('Current LTV:', `${currentLTV}%`);
-
       // Calculate available to borrow
       const maxBorrow = BigInt(Math.floor(Number(deposited) * ltv)); // Round down to avoid floating point
       const availableToBorrow =
         maxBorrow > borrowed
           ? ((maxBorrow - borrowed) / decimalsBigInt).toString()
           : '0';
-
-      logger.log('\n--- Borrowing Capacity ---');
-      logger.log('Max Borrowable:', formatUnits(maxBorrow, decimals));
-      logger.log('Available to Borrow:', availableToBorrow);
-
-      logger.log('\n--- Formatted Position Summary ---');
-      logger.log('Deposited:', formatUnits(deposited, decimals));
-      logger.log('Borrowed:', formatUnits(borrowed, decimals));
-      logger.log('Health Factor:', healthFactor);
-      logger.log('Current LTV:', `${currentLTV}%`);
-      logger.log('Available to Borrow:', availableToBorrow);
-
-      logger.log('\n=== Position Monitoring Complete ===');
 
       return {
         deposited: (deposited / decimalsBigInt).toString(),
@@ -1127,9 +885,59 @@ export class IroncladService {
         availableToBorrow,
       };
     } catch (error) {
-      logger.error('\n❌ Error Monitoring Position ❌');
-      logger.error('Error Details:', error);
       throw Error(`Failed to monitor lending position: ${error}`);
     }
+  }
+
+  private async getHints(
+    walletClient: EVMWalletClient,
+    collateral: string,
+    collateralAmount: bigint,
+    debt: bigint,
+  ): Promise<{ upperHint: string; lowerHint: string }> {
+    const decimals = (
+      await walletClient.read({
+        address: collateral as `0x${string}`,
+        abi: ERC20_ABI,
+        functionName: 'decimals',
+      })
+    ).value;
+
+    const troveCount = (
+      await walletClient.read({
+        address: TROVE_MANAGER_ADDRESS as `0x${string}`,
+        abi: TROVE_MANAGER_ABI,
+        functionName: 'getTroveOwnersCount',
+        args: [collateral],
+      })
+    ).value;
+
+    const numTrials = Math.ceil(15 * Math.sqrt(Number(troveCount)));
+    const NICR = (
+      await walletClient.read({
+        address: HINT_HELPERS_ADDRESS as `0x${string}`,
+        abi: HINT_HELPERS_ABI,
+        functionName: 'computeNominalCR',
+        args: [collateralAmount, debt, decimals],
+      })
+    ).value;
+
+    const randomSeed = Math.floor(Math.random() * 1000000);
+
+    const result = await walletClient.read({
+      address: HINT_HELPERS_ADDRESS as `0x${string}`,
+      abi: HINT_HELPERS_ABI,
+      functionName: 'getApproxHint',
+      args: [collateral, NICR, numTrials, randomSeed],
+    });
+
+    // The function returns (address hintAddress, uint diff, uint latestRandomSeed)
+    const [hintAddress] = (result as { value: [`0x${string}`, bigint, bigint] })
+      .value;
+
+    return {
+      upperHint: hintAddress,
+      lowerHint: '0x0000000000000000000000000000000000000000', // zero address
+    };
   }
 }
