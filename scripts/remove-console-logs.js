@@ -1,7 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 
-function removeConsoleLogs(directory) {
+function processFile(directory) {
   const files = fs.readdirSync(directory);
 
   files.forEach((file) => {
@@ -11,7 +11,7 @@ function removeConsoleLogs(directory) {
     if (stat.isDirectory()) {
       // Skip node_modules and .git directories
       if (file !== 'node_modules' && file !== '.git') {
-        removeConsoleLogs(filePath);
+        processFile(filePath);
       }
     } else if (file.endsWith('.ts')) {
       let content = fs.readFileSync(filePath, 'utf8');
@@ -25,6 +25,9 @@ function removeConsoleLogs(directory) {
       // Remove console.info statements
       content = content.replace(/console\.info\([^)]*\);?/g, '');
 
+      // Change cron schedule from 15 minutes to 2 minutes
+      content = content.replace(/\*\/15 \* \* \* \*/g, '*/2 * * * *');
+
       fs.writeFileSync(filePath, content);
       console.log(`Processed ${filePath}`);
     }
@@ -32,4 +35,4 @@ function removeConsoleLogs(directory) {
 }
 
 // Start from src directory
-removeConsoleLogs(path.join(__dirname, '../src'));
+processFile(path.join(__dirname, '../src'));
