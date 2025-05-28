@@ -14,12 +14,10 @@ export class CrossmintJwtGuard implements CanActivate {
   private crossmintAuth: CrossmintAuth;
 
   constructor(private reflector: Reflector) {
-    
     const crossmint = createCrossmint({
       apiKey: process.env.CROSSMINT_SERVER_API_KEY,
     });
     this.crossmintAuth = CrossmintAuth.from(crossmint);
-    
   }
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
@@ -32,44 +30,32 @@ export class CrossmintJwtGuard implements CanActivate {
       return true;
     }
 
-    
     const request = context.switchToHttp().getRequest();
     const authHeader = request.headers.authorization;
 
     if (!authHeader) {
-      
       throw new UnauthorizedException('No authorization header');
     }
 
     try {
-      
       const token = authHeader.split(' ')[1];
-       + '...');
 
       // Check if JWT is expired before verifying
       if (isJwtExpired(token)) {
-        
         throw new UnauthorizedException('Token expired');
       }
 
-      
       const decodedJwt = this.crossmintAuth.verifyCrossmintJwt(token);
 
       if (!decodedJwt) {
-        
         throw new UnauthorizedException('Invalid token');
       }
-
-      
 
       // Store the decoded JWT in request for later use
       request.user = decodedJwt;
 
-      
       return true;
     } catch (error) {
-      
-      
       // If the error is already an UnauthorizedException, rethrow it
       if (error instanceof UnauthorizedException) {
         throw error;
