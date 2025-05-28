@@ -764,6 +764,7 @@ export class AppService {
     tweets: { id: string; authorId: string; text: string }[],
   ) {
     try {
+      console.log('tweets', tweets);
       // Initialize Twitter client with OAuth 1.0a for write actions (replies)
       const twitterClient = new TwitterApi({
         appKey: this.configService.get<string>('TWITTER_API_KEY'),
@@ -874,7 +875,7 @@ export class AppService {
               prompt: contextualPrompt,
               onStepFinish: (event) => {},
             });
-
+            console.log('result', result);
             // Post reply to the tweet
             try {
               // Format the response to fit Twitter's character limit
@@ -885,7 +886,7 @@ export class AppService {
                 formattedResponse,
                 tweet.id,
               );
-
+              console.log('reply', reply);
               // Only save the assistant's response after successful Twitter reply
               await this.chatModel.findOneAndUpdate(
                 { walletAddress, sessionId },
@@ -910,6 +911,7 @@ export class AppService {
                 walletAddress,
               };
             } catch (replyError) {
+              console.log('replyError', replyError);
               // Return the result without saving to chat history if reply fails
               return {
                 tweetId: tweet.id,
@@ -921,6 +923,7 @@ export class AppService {
               };
             }
           } catch (error) {
+            console.log('error', error);
             throw new HttpException(
               error.message || 'Failed to process agent request',
               error.response?.status || 500,
