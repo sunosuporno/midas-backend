@@ -91,17 +91,17 @@ export class OneInchService {
     parameters: SwapParameters,
   ): Promise<string> {
     const chainId = walletClient.getChain().id;
-    console.log('Chain ID:', chainId);
+    logger.log('Chain ID:', chainId);
     const fromAddress = walletClient.getAddress();
 
     // Get the spender address first
-    console.log('Getting spender address...');
+    logger.log('Getting spender address...');
     const spenderResponse = await this.makeRequest<{ address: string }>(
       `/swap/v6.0/${chainId}/approve/spender`,
     );
-    console.log('Spender address:', spenderResponse.address);
+    logger.log('Spender address:', spenderResponse.address);
 
-    console.log('Approving token...');
+    logger.log('Approving token...');
     await walletClient.sendTransaction({
       to: parameters.fromTokenAddress,
       abi: erc20Abi,
@@ -110,7 +110,7 @@ export class OneInchService {
     });
 
     // Get the swap transaction data
-    console.log('Getting swap transaction data...');
+    logger.log('Getting swap transaction data...');
     const swapParams = {
       src: parameters.fromTokenAddress,
       dst: parameters.toTokenAddress,
@@ -123,15 +123,15 @@ export class OneInchService {
     const swapResponse = await this.makeRequest<{
       tx: { to: string; data: string; value: string };
     }>(`/swap/v6.0/${chainId}/swap`, swapParams);
-    console.log('Swap transaction data received');
+    logger.log('Swap transaction data received');
 
     // Execute the swap
-    console.log('Executing swap transaction...');
+    logger.log('Executing swap transaction...');
     const tx = await walletClient.sendTransaction({
       to: swapResponse.tx.to,
       data: swapResponse.tx.data as `0x${string}`,
     });
-    console.log('Swap transaction sent:', tx.hash);
+    logger.log('Swap transaction sent:', tx.hash);
 
     return tx.hash;
   }

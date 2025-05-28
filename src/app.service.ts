@@ -68,31 +68,23 @@ export class AppService {
 
   async generateApiKey(walletAddress: string): Promise<{ apiKey: string }> {
     try {
-      console.log('=== Generating API Key ===');
-      console.log('Wallet Address:', walletAddress);
-
       // Check if wallet already has an API key
       const existingKey = await this.apiKeyModel.findOne({ walletAddress });
       if (existingKey) {
-        console.log('API key already exists for wallet');
         throw new HttpException('API key already exists for this wallet', 400);
       }
 
       const apiKey = randomBytes(32).toString('hex');
-      console.log('Generated API Key:', apiKey);
 
       const encryptedKey = this.encrypt(apiKey);
-      console.log('Encrypted Key:', encryptedKey);
 
       const apiKeyDoc = await this.apiKeyModel.create({
         walletAddress,
         encryptedKey,
       });
-      console.log('Saved to database with ID:', apiKeyDoc._id);
 
       return { apiKey };
     } catch (error) {
-      console.error('Error generating API key:', error);
       throw new HttpException(
         error.message || 'Failed to generate API key',
         error.status || 500,
@@ -104,9 +96,7 @@ export class AppService {
     if (!apiKey) {
       throw new HttpException('API key is required', 401);
     }
-    console.log('API Key:', apiKey);
     const encryptedKey = this.encrypt(apiKey);
-    console.log('Encrypted Key:', encryptedKey);
     const keyDoc = await this.apiKeyModel.findOne({ encryptedKey });
 
     if (!keyDoc) {
@@ -125,7 +115,6 @@ export class AppService {
     createDelegatedKeyDto: CreateDelegatedKeyDto,
   ) {
     try {
-      console.log('=== Assign Delegate Key Request ===');
       const apiKey = this.configService.get<string>('CROSSMINT_SERVER_API_KEY');
       const signerWallet = this.configService.get<string>('SIGNER_WALLET');
 
@@ -137,18 +126,13 @@ export class AppService {
         throw new HttpException('Invalid expiresAt timestamp', 400);
       }
 
-      console.log('chain:', createDelegatedKeyDto.chain);
-
       const body = {
         chain: createDelegatedKeyDto.chain,
         expiresAt: expiresAt,
         signer: signerWallet,
       };
 
-      console.log('body:', body);
-
       // Step 1: Create initial delegated key
-      console.log('Step 1: Registering delegated key');
       const initialResponse = await axios.post(
         `https://www.crossmint.com/api/2022-06-09/wallets/${walletLocator}/signers`,
         body,
@@ -158,10 +142,6 @@ export class AppService {
             'Content-Type': 'application/json',
           },
         },
-      );
-      console.log(
-        'Initial Response:',
-        JSON.stringify(initialResponse.data, null, 2),
       );
 
       const chainAuth =
@@ -210,25 +190,8 @@ export class AppService {
         signer: chainAuth.approvals.pending[0].signer,
         authorizationId: chainAuth.id,
       };
-      console.log(
-        '=== Response to Frontend ===\n',
-        JSON.stringify(result, null, 2),
-      );
       return result;
     } catch (error) {
-      console.error('=== Error in createDelegatedKey ===');
-      console.error(
-        'Error details:',
-        JSON.stringify(
-          {
-            message: error.message,
-            response: error.response?.data,
-            status: error.response?.status,
-          },
-          null,
-          2,
-        ),
-      );
       throw new HttpException(
         error.response?.data?.message || 'Failed to create delegated key',
         error.response?.status || 500,
@@ -238,23 +201,9 @@ export class AppService {
 
   async approveDelegate(approveDelegateDto: ApproveDelegateDto) {
     try {
-      console.log('=== Approving Delegate ===');
       const apiKey = this.configService.get<string>('CROSSMINT_SERVER_API_KEY');
       const { walletLocator, signatureId, signer, signingResult } =
         approveDelegateDto;
-
-      console.log('Approval Request:', {
-        approvals: [
-          {
-            signer: signer,
-            metadata: signingResult.metadata,
-            signature: {
-              r: signingResult.signature.r.toString(),
-              s: signingResult.signature.s.toString(),
-            },
-          },
-        ],
-      });
 
       const response = await axios.post(
         `https://www.crossmint.com/api/2022-06-09/wallets/${walletLocator}/signatures/${signatureId}/approvals`,
@@ -278,22 +227,8 @@ export class AppService {
         },
       );
 
-      console.log('Approval Response:', JSON.stringify(response.data, null, 2));
       return response.data;
     } catch (error) {
-      console.error('=== Error in approveDelegate ===');
-      console.error(
-        'Error details:',
-        JSON.stringify(
-          {
-            message: error.message,
-            response: error.response?.data,
-            status: error.response?.status,
-          },
-          null,
-          2,
-        ),
-      );
       throw new HttpException(
         error.response?.data?.message || 'Failed to approve delegate',
         error.response?.status || 500,
@@ -302,7 +237,6 @@ export class AppService {
   }
 
   async createChatSession(walletAddress: string) {
-    console.log('=== Creating Chat Session ===');
     const sessionId = uuidv4();
     const chat = new this.chatModel({
       walletAddress,
@@ -337,25 +271,18 @@ export class AppService {
   }
 
   async getChatSessions(walletAddress: string) {
-    console.log('=== Getting Chat Sessions ===');
-    console.log('Wallet Address:', walletAddress);
-
     try {
       const sessions = await this.chatModel
         .find({ walletAddress })
         .select('sessionId createdAt')
         .sort({ createdAt: -1 });
 
-      console.log('Found sessions:', sessions); // Debug log
-
       if (!sessions || sessions.length === 0) {
-        console.log('No sessions found for wallet address');
         return [];
       }
 
       return sessions;
     } catch (error) {
-      console.error('Error fetching chat sessions:', error);
       throw error;
     }
   }
@@ -448,10 +375,6 @@ export class AppService {
     sessionId?: string,
   ) {
     try {
-      console.log('=== Calling Agent ===');
-      console.log('Chain:', chain);
-      console.log('Wallet Address:', walletAddress);
-
       if (!isSmartWalletChain(chain)) {
         throw new HttpException(
           'This chain does not support smart wallet operations',
@@ -462,14 +385,8 @@ export class AppService {
       // Get the chain configuration
       const chainConfig = this.chainConfigMap[chain];
       if (!chainConfig) {
-        console.error('Unsupported chain:', chain);
         throw new Error(`Unsupported chain: ${chain}`);
       }
-      console.log('Chain Configuration:', {
-        chain: chain,
-        rpcUrl: chainConfig.rpcUrl,
-        chainObject: chainConfig.chain,
-      });
 
       // Fetch chat history if sessionId is provided
       let contextualPrompt = prompt;
@@ -511,12 +428,6 @@ export class AppService {
 
       const { evmSmartWallet } = crossmint(apiKey);
 
-      console.log('Creating smart wallet with configuration:', {
-        address: walletAddress,
-        chain: chain,
-        provider: alchemyApiKey,
-      });
-
       const tools = await getOnChainTools({
         wallet: await evmSmartWallet({
           address: walletAddress,
@@ -532,27 +443,15 @@ export class AppService {
               this.configService.get<string>('COINGECKO_API_KEY'),
           }),
           erc20({ tokens: [USDC, USDT, MODE, WETH, ezETH, wrsETH] }),
-          // odos(),
           zeroEx({
             apiKey: (() => {
               const key = this.configService.get<string>('ZEROX_API_KEY');
-              console.log(
-                'Debug - ZEROX_API_KEY value:',
-                key ? 'present' : 'undefined',
-              );
               return key;
             })(),
           }),
-          // ironclad(),
-          // oneInch({
-          //   apiKey: this.configService.get<string>('1INCH_API_KEY'),
-          // }),
         ],
       });
 
-      console.log('\n-------------------\n');
-      console.log('TOOLS CALLED');
-      console.log('\n-------------------\n');
       try {
         const result = await generateText({
           model: openai('gpt-4o'),
@@ -561,16 +460,8 @@ export class AppService {
             'Your name is Midas, named after the fabled King whose touch turned things to gold. As an agent, you are the best DeFi assistant there is who can do all types of DeFi actions like swapping, staking, voting, etc. When you are asked to do any action, search the tools for the description which matches the action you are asked to do. If you find a match, use the tool to perform the action. Also, if a tool mentions to not call or call another tool in its description, make sure you follow the instructions. Send the data in markdown format.',
           maxSteps: 12,
           prompt: contextualPrompt,
-          onStepFinish: (event) => {
-            console.log(event.toolResults);
-          },
+          onStepFinish: (event) => {},
         });
-
-        console.log('\n-------------------\n');
-        console.log('RESPONSE');
-        console.log('\n-------------------\n');
-        console.log(result.text);
-        console.log('\n-------------------\n');
 
         // Save the conversation
         if (sessionId) {
@@ -592,19 +483,12 @@ export class AppService {
           response: result.text,
         };
       } catch (error) {
-        console.error('Error in generateText:', error);
         throw new HttpException(
           error.message || 'Failed to process agent request',
           error.response?.status || 500,
         );
       }
     } catch (error) {
-      console.error('Error in callAgent:', {
-        error: error.message,
-        stack: error.stack,
-        chain: chain,
-        walletAddress: walletAddress,
-      });
       throw new HttpException(
         error.message || 'Failed to process agent request',
         error.response?.status || 500,
@@ -646,7 +530,6 @@ export class AppService {
         throw error; // Re-throw if it's not a 404 error
       }
     } catch (error) {
-      console.error('Error in checkDelegated:', error);
       throw new HttpException(
         error.response?.data?.message || 'Failed to check delegation',
         error.response?.status || 500,
@@ -660,24 +543,14 @@ export class AppService {
     chain: SmartWalletChainType,
   ) {
     try {
-      console.log('=== Calling Agent (Public) ===');
-      console.log('Using wallet address:', walletAddress);
-      console.log('chain', chain);
-
       // Get the chain configuration
       const chainConfig = this.chainConfigMap[chain];
       if (!chainConfig) {
-        console.error('Unsupported chain:', chain);
         throw new HttpException(
           'This chain does not support smart wallet operations',
           400,
         );
       }
-      console.log('Chain Configuration:', {
-        chain: chain,
-        rpcUrl: chainConfig.rpcUrl,
-        chainObject: chainConfig.chain,
-      });
 
       // Get the latest session or create a new one
       const latestChat = await this.chatModel
@@ -732,12 +605,6 @@ export class AppService {
         throw new Error('Missing required environment variables');
       }
 
-      console.log('Creating smart wallet with configuration:', {
-        address: walletAddress,
-        chain: chainConfig.chain,
-        provider: alchemyApiKey,
-      });
-
       const { evmSmartWallet } = crossmint(apiKey);
 
       const tools = await getOnChainTools({
@@ -755,18 +622,12 @@ export class AppService {
               this.configService.get<string>('COINGECKO_API_KEY'),
           }),
           erc20({ tokens: [USDC, USDT, MODE, WETH, ezETH, wrsETH] }),
-          // oneInch({
-          //   apiKey: this.configService.get<string>('1INCH_API_KEY'),
-          // }),
           zeroEx({
             apiKey: this.configService.get<string>('ZEROX_API_KEY'),
           }),
         ],
       });
 
-      console.log('\n-------------------\n');
-      console.log('TOOLS CALLED');
-      console.log('\n-------------------\n');
       try {
         const result = await generateText({
           model: openai('gpt-4o'),
@@ -775,16 +636,8 @@ export class AppService {
             'Your name is Midas, named after the fabled King whose touch turned things to gold. As an agent, you are the best DeFi assistant there is who can do all types of DeFi actions like swapping, staking, voting, etc. When you are asked to do any action, search the tools for the description which matches the action you are asked to do. If you find a match, use the tool to perform the action. Also, if a tool mentions to not call or call another tool in its description, make sure you follow the instructions. Send the data in markdown format.',
           maxSteps: 12,
           prompt: contextualPrompt,
-          onStepFinish: (event) => {
-            console.log(event.toolResults);
-          },
+          onStepFinish: (event) => {},
         });
-
-        console.log('\n-------------------\n');
-        console.log('RESPONSE');
-        console.log('\n-------------------\n');
-        console.log(result.text);
-        console.log('\n-------------------\n');
 
         // Save the assistant's response
         await this.chatModel.findOneAndUpdate(
@@ -806,19 +659,12 @@ export class AppService {
           sessionId,
         };
       } catch (error) {
-        console.error('Error in generateText:', error);
         throw new HttpException(
           error.message || 'Failed to process agent request',
           error.response?.status || 500,
         );
       }
     } catch (error) {
-      console.error('Error in callAgentPublic:', {
-        error: error.message,
-        stack: error.stack,
-        chain: chain,
-        walletAddress: walletAddress,
-      });
       throw new HttpException(
         error.message || 'Failed to process agent request',
         error.response?.status || 500,
@@ -852,9 +698,6 @@ export class AppService {
     privateKey: string,
   ) {
     try {
-      console.log('=== Calling Agent (Viem) ===');
-      console.log('chain', chain);
-
       // Get the chain configuration
       const chainConfig = this.chainConfigMap[chain];
       if (!chainConfig) {
@@ -869,16 +712,11 @@ export class AppService {
         normalizedPrivateKey as `0x${string}`,
       );
 
-      console.log('RPC URL:', chainConfig.rpcUrl);
-
       const walletClient = createWalletClient({
         account: account as any,
         transport: http(chainConfig.rpcUrl),
         chain: chainConfig.chain as any,
       });
-
-      console.log('running');
-      console.log(this.configService.get<string>('COINGECKO_API_KEY'));
 
       const tools = await getOnChainTools({
         wallet: viem(walletClient as any),
@@ -887,20 +725,13 @@ export class AppService {
             coingeckoApiKey:
               this.configService.get<string>('COINGECKO_API_KEY'),
           }),
-          // odos(),
           zeroEx({
             apiKey: this.configService.get<string>('ZEROX_API_KEY'),
           }),
-          // oneInch({
-          //   apiKey: this.configService.get<string>('1INCH_API_KEY'),
-          // }),
           erc20({ tokens: [USDC, USDT, MODE, WETH, ezETH, wrsETH] }),
         ],
       });
 
-      console.log('\n-------------------\n');
-      console.log('TOOLS CALLED');
-      console.log('\n-------------------\n');
       try {
         const result = await generateText({
           model: openai('gpt-4o'),
@@ -909,29 +740,19 @@ export class AppService {
             'Your name is Midas, named after the fabled King whose touch turned things to gold. As an agent, you are the best DeFi assistant there is who can do all types of DeFi actions like swapping, staking, voting, etc. When you are asked to do any action, search the tools for the description which matches the action you are asked to do. If you find a match, use the tool to perform the action. Also, if a tool mentions to not call or call another tool in its description, make sure you follow the instructions. Send the data in markdown format.',
           maxSteps: 12,
           prompt: prompt,
-          onStepFinish: (event) => {
-            console.log(event.toolResults);
-          },
+          onStepFinish: (event) => {},
         });
-
-        console.log('\n-------------------\n');
-        console.log('RESPONSE');
-        console.log('\n-------------------\n');
-        console.log(result.text);
-        console.log('\n-------------------\n');
 
         return {
           response: result.text,
         };
       } catch (error) {
-        console.error('Error in generateText:', error);
         throw new HttpException(
           error.message || 'Failed to process agent request',
           error.response?.status || 500,
         );
       }
     } catch (error) {
-      console.error('Error in callAgentViem:', error);
       throw new HttpException(
         error.message || 'Failed to process agent request',
         error.response?.status || 500,
@@ -943,9 +764,6 @@ export class AppService {
     tweets: { id: string; authorId: string; text: string }[],
   ) {
     try {
-      console.log('=== Processing Twitter Mentions Batch ===');
-      console.log('Number of tweets:', tweets.length);
-
       // Initialize Twitter client with OAuth 1.0a for write actions (replies)
       const twitterClient = new TwitterApi({
         appKey: this.configService.get<string>('TWITTER_API_KEY'),
@@ -963,9 +781,6 @@ export class AppService {
               twitterId: tweet.authorId,
             });
             if (!user || !user.wallet) {
-              console.error(
-                `No wallet found for Twitter user ${tweet.authorId}`,
-              );
               return null;
             }
 
@@ -1047,9 +862,6 @@ export class AppService {
                 zeroEx({
                   apiKey: this.configService.get<string>('ZEROX_API_KEY'),
                 }),
-                // oneInch({
-                //   apiKey: this.configService.get<string>('1INCH_API_KEY'),
-                // }),
               ],
             });
 
@@ -1060,9 +872,7 @@ export class AppService {
                 'Your name is Midas, named after the fabled King whose touch turned things to gold. As an agent, you are the best DeFi assistant there is who can do all types of DeFi actions like swapping, staking, voting, etc. When you are asked to do any action, search the tools for the description which matches the action you are asked to do. If you find a match, use the tool to perform the action. Also, if a tool mentions to not call or call another tool in its description, make sure you follow the instructions. Be extremely, extremely careful with base units of each token, convert each token into its base units before performing swapping and other stuff. Send the data in markdown format.',
               maxSteps: 12,
               prompt: contextualPrompt,
-              onStepFinish: (event) => {
-                console.log(event.toolResults);
-              },
+              onStepFinish: (event) => {},
             });
 
             // Post reply to the tweet
@@ -1075,8 +885,6 @@ export class AppService {
                 formattedResponse,
                 tweet.id,
               );
-
-              console.log(`Posted reply to tweet ${tweet.id}:`, reply.data);
 
               // Only save the assistant's response after successful Twitter reply
               await this.chatModel.findOneAndUpdate(
@@ -1102,10 +910,6 @@ export class AppService {
                 walletAddress,
               };
             } catch (replyError) {
-              console.error(
-                `Error posting reply to tweet ${tweet.id}:`,
-                replyError,
-              );
               // Return the result without saving to chat history if reply fails
               return {
                 tweetId: tweet.id,
@@ -1117,8 +921,10 @@ export class AppService {
               };
             }
           } catch (error) {
-            console.error(`Error processing tweet ${tweet.id}:`, error);
-            return null;
+            throw new HttpException(
+              error.message || 'Failed to process agent request',
+              error.response?.status || 500,
+            );
           }
         }),
       );
@@ -1132,7 +938,6 @@ export class AppService {
         results: successfulResults,
       };
     } catch (error) {
-      console.error('Error in callAgentTwitter:', error);
       throw new HttpException(
         error.message || 'Failed to process agent request',
         error.response?.status || 500,

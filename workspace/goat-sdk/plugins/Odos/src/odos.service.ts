@@ -34,8 +34,8 @@ export class OdosService {
     walletClient: EVMWalletClient,
     parameters: GetQuoteParameters,
   ) {
-    console.log('=== Starting Odos GetQuote ===');
-    console.log('Input Parameters:', {
+    logger.log('=== Starting Odos GetQuote ===');
+    logger.log('Input Parameters:', {
       sellToken: parameters.sellToken,
       buyToken: parameters.buyToken,
       sellAmount: parameters.sellAmount,
@@ -64,18 +64,18 @@ export class OdosService {
       compact: true,
     };
 
-    console.log('Request Body:', JSON.stringify(requestBody, null, 2));
+    logger.log('Request Body:', JSON.stringify(requestBody, null, 2));
 
     try {
       const quote = await this.makeRequest('/sor/quote/v2', requestBody);
-      console.log('Quote Response:', {
+      logger.log('Quote Response:', {
         success: true,
         response: quote,
       });
-      console.log('=== Odos GetQuote Complete ===');
+      logger.log('=== Odos GetQuote Complete ===');
       return quote;
     } catch (error) {
-      console.error('Error in Odos GetQuote:', {
+      logger.error('Error in Odos GetQuote:', {
         error: error.message,
         code: error.code,
         requestBody: requestBody,
@@ -114,9 +114,9 @@ export class OdosService {
     );
 
     const transaction = assembledTransaction.transaction;
-    console.log('transaction', transaction);
+    logger.log('transaction', transaction);
 
-    console.log('Sending approve');
+    logger.log('Sending approve');
     await walletClient.sendTransaction({
       to: quote.inTokens[0],
       abi: erc20Abi,
@@ -124,7 +124,7 @@ export class OdosService {
       args: [transaction.to, quote.inAmounts[0]],
     });
 
-    console.log('Sending transaction');
+    logger.log('Sending transaction');
     const tx = await walletClient.sendTransaction({
       to: transaction.to,
       data: transaction.data,

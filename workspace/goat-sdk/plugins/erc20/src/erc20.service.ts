@@ -66,7 +66,7 @@ export class Erc20Service {
   ) {
     try {
       const resolvedWalletAddress = parameters.wallet as `0x${string}`;
-      console.log('chain', walletClient.getChain());
+      logger.log('chain', walletClient.getChain());
       const rawBalance = await walletClient.read({
         address: parameters.tokenAddress,
         abi: ERC20_ABI,
@@ -105,7 +105,7 @@ export class Erc20Service {
         valueUSD: valueUSD.toFixed(2),
       };
     } catch (error) {
-      console.error('Error fetching balance and price:', error);
+      logger.error('Error fetching balance and price:', error);
       return {
         balance: '0',
         valueUSD: null,
@@ -123,14 +123,14 @@ export class Erc20Service {
     parameters: TransferParameters,
   ) {
     try {
-      console.log('Starting ERC20 transfer:', {
+      logger.log('Starting ERC20 transfer:', {
         tokenAddress: parameters.tokenAddress,
         toAddress: parameters.to,
         amount: parameters.amount.toString(),
       });
 
       const to = parameters.to as `0x${string}`;
-      console.log('Resolved recipient address:', to);
+      logger.log('Resolved recipient address:', to);
 
       const hash = await walletClient.sendTransaction({
         to: parameters.tokenAddress,
@@ -139,7 +139,7 @@ export class Erc20Service {
         args: [to, parameters.amount],
       });
 
-      console.log('ERC20 transfer successful:', {
+      logger.log('ERC20 transfer successful:', {
         transactionHash: hash.hash,
         tokenAddress: parameters.tokenAddress,
         to: to,
@@ -148,7 +148,7 @@ export class Erc20Service {
 
       return hash.hash;
     } catch (error) {
-      console.error('ERC20 transfer failed:', {
+      logger.error('ERC20 transfer failed:', {
         tokenAddress: parameters.tokenAddress,
         to: parameters.to,
         amount: parameters.amount.toString(),
@@ -209,7 +209,7 @@ export class Erc20Service {
   })
   async approve(walletClient: EVMWalletClient, parameters: ApproveParameters) {
     try {
-      console.log('approving', parameters);
+      logger.log('approving', parameters);
       const spender = parameters.spender as `0x${string}`;
 
       const hash = await walletClient.sendTransaction({

@@ -65,7 +65,6 @@ export class MentionCronService implements OnModuleInit {
       );
 
       if (!response.data?.data) {
-        console.error('No tweet data found in response');
         return [];
       }
 
@@ -105,17 +104,14 @@ export class MentionCronService implements OnModuleInit {
   }
 
   async onModuleInit() {
-    // Schedule a task to run every 15 minutes
-    cron.schedule('*/15 * * * *', async () => {
+    // Schedule a task to run every 2 minutes
+    cron.schedule('*/2 * * * *', async () => {
       try {
         const botUsername = this.configService.get('TWITTER_BOT_USERNAME');
-        console.log('Bot username:', botUsername);
-        console.log('Last processed timestamp:', this.lastProcessedTimestamp);
 
         // Get user ID for the bot username
         const user = await this.twitterClient.v2.userByUsername(botUsername);
         const userId = user.data.id;
-        console.log('User ID:', userId);
 
         // Fetch mentions for the bot user
         const mentions = await this.twitterClient.v2.userMentionTimeline(
@@ -128,32 +124,24 @@ export class MentionCronService implements OnModuleInit {
 
         const tweets = mentions.data?.data || [];
         if (tweets.length === 0) {
-          console.log('No new mentions found');
           return;
         }
 
         // Get author IDs for all tweets
         const processedTweets = await this.getTweetAuthors(tweets);
-        console.log('Processed tweets:', processedTweets);
 
         if (processedTweets.length === 0) {
-          console.log('No valid tweets to process');
           return;
         }
 
         // Process all tweets in batch
-        const result = await this.appService.callAgentTwitter(processedTweets);
+        await this.appService.callAgentTwitter(processedTweets);
 
         // Update the last processed timestamp to current time
         this.lastProcessedTimestamp = new Date().toISOString();
-        console.log(
-          'Updated last processed timestamp:',
-          this.lastProcessedTimestamp,
-        );
-
-        console.log('Processed results:', result);
       } catch (error) {
-        console.error('Error fetching mentions:', error);
+        // Log error but don't throw to keep the cron job running
+        console.error('Error in mention cron job:', error);
       }
     });
   }

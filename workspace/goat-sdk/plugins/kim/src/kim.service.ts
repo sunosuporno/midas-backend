@@ -554,9 +554,9 @@ export class KimService {
     parameters: GetLPTokensParams,
   ): Promise<Array<{ tokenId: string; index: number }>> {
     try {
-      console.log('\n=== Getting LP Tokens ===');
-      console.log('User address:', parameters.userAddress);
-      console.log('Position Manager address:', POSITION_MANAGER_ADDRESS);
+      logger.log('\n=== Getting LP Tokens ===');
+      logger.log('User address:', parameters.userAddress);
+      logger.log('Position Manager address:', POSITION_MANAGER_ADDRESS);
 
       const balanceResult = await walletClient.read({
         address: POSITION_MANAGER_ADDRESS as `0x${string}`,
@@ -566,18 +566,18 @@ export class KimService {
       });
 
       const balance = Number((balanceResult as { value: bigint }).value);
-      console.log('Number of LP tokens:', balance);
+      logger.log('Number of LP tokens:', balance);
 
       if (balance === 0) {
-        console.log('User has no LP tokens');
+        logger.log('User has no LP tokens');
         return [];
       }
 
-      console.log('Fetching token IDs...');
+      logger.log('Fetching token IDs...');
       // Now get each token ID
       const tokenIds = await Promise.all(
         Array.from({ length: balance }, async (_, index) => {
-          console.log(`\nFetching token at index ${index}...`);
+          logger.log(`\nFetching token at index ${index}...`);
           const tokenResult = await walletClient.read({
             address: POSITION_MANAGER_ADDRESS as `0x${string}`,
             abi: POSITION_MANAGER_ABI,
@@ -586,7 +586,7 @@ export class KimService {
           });
 
           const tokenId = (tokenResult as { value: bigint }).value;
-          console.log(`Token ID at index ${index}:`, tokenId.toString());
+          logger.log(`Token ID at index ${index}:`, tokenId.toString());
 
           return {
             tokenId: tokenId.toString(),
@@ -595,10 +595,10 @@ export class KimService {
         }),
       );
 
-      console.log('\nAll token IDs:', tokenIds);
+      logger.log('\nAll token IDs:', tokenIds);
       return tokenIds;
     } catch (error) {
-      console.error('Error in getLPTokens:', error);
+      logger.error('Error in getLPTokens:', error);
       throw new Error(`Failed to get LP tokens: ${error}`);
     }
   }
@@ -620,7 +620,7 @@ export class KimService {
     positionValue: string;
   }> {
     try {
-      console.log('Calculating APY for position:', parameters.tokenId);
+      logger.log('Calculating APY for position:', parameters.tokenId);
 
       // Get position details
       const positionResult = await walletClient.read({
@@ -629,7 +629,7 @@ export class KimService {
         functionName: 'positions',
         args: [parameters.tokenId],
       });
-      console.log('Position details:', positionResult.value);
+      logger.log('Position details:', positionResult.value);
 
       // Extract position data
       const position = positionResult.value;
@@ -639,7 +639,7 @@ export class KimService {
       const feeGrowthInside0LastX128 = position[7];
       const feeGrowthInside1LastX128 = position[8];
 
-      console.log('Extracted position data:', {
+      logger.log('Extracted position data:', {
         token0,
         token1,
         liquidity: liquidity.toString(),
@@ -655,7 +655,7 @@ export class KimService {
         args: [token0, token1],
       });
       const poolAddress = poolAddressResult.value as `0x${string}`;
-      console.log('Pool address:', poolAddress);
+      logger.log('Pool address:', poolAddress);
 
       // Get current fee growth from pool
       const [
@@ -692,7 +692,7 @@ export class KimService {
         }),
       ]);
 
-      console.log('Fee and price data:', {
+      logger.log('Fee and price data:', {
         currentFeeGrowth0: currentFeeGrowth0.value.toString(),
         currentFeeGrowth1: currentFeeGrowth1.value.toString(),
         token0Decimals: token0Decimals.value,
@@ -714,7 +714,7 @@ export class KimService {
         Number(token1Decimals.value),
       );
 
-      console.log('Calculated fees earned:', {
+      logger.log('Calculated fees earned:', {
         feesEarned0,
         feesEarned1,
       });
@@ -723,7 +723,7 @@ export class KimService {
       const price = this.calculatePrice(
         globalStateResult.value as readonly unknown[],
       );
-      console.log('Calculated price:', price);
+      logger.log('Calculated price:', price);
 
       const positionValue = this.calculatePositionValue(
         liquidity as bigint,
@@ -734,7 +734,7 @@ export class KimService {
 
       // Calculate APY
       const daysElapsed = parameters.daysToConsider || 365;
-      console.log('Days elapsed:', daysElapsed);
+      logger.log('Days elapsed:', daysElapsed);
 
       // Calculate daily fee return
       const dailyFeeReturn = (feesEarned0 + feesEarned1 * price) / daysElapsed;
@@ -745,7 +745,7 @@ export class KimService {
       // Calculate APY
       const apy = (annualizedReturn / positionValue) * 100;
 
-      console.log('APY calculation:', {
+      logger.log('APY calculation:', {
         daysElapsed,
         annualizedReturn,
         apy,
@@ -760,7 +760,7 @@ export class KimService {
         positionValue: positionValue.toString(),
       };
     } catch (error) {
-      console.error('Error calculating APY:', error);
+      logger.error('Error calculating APY:', error);
       throw new Error(`Failed to calculate APY: ${error}`);
     }
   }
@@ -787,7 +787,7 @@ export class KimService {
       // Calculate total value in terms of token0
       const totalValue = amount0Adjusted + amount1Adjusted * price;
 
-      console.log('Position value calculation:', {
+      logger.log('Position value calculation:', {
         liquidityDecimal,
         amount0,
         amount1,
@@ -798,7 +798,7 @@ export class KimService {
 
       return totalValue;
     } catch (error) {
-      console.error('Error in calculatePositionValue:', error);
+      logger.error('Error in calculatePositionValue:', error);
       throw error;
     }
   }
@@ -816,7 +816,7 @@ export class KimService {
       const feesRaw = (Number(feeGrowthDelta) * Number(liquidity)) / 2 ** 128;
       const feesAdjusted = feesRaw / 10 ** decimals;
 
-      console.log('Fee calculation:', {
+      logger.log('Fee calculation:', {
         feeGrowthDelta: feeGrowthDelta.toString(),
         feesRaw,
         feesAdjusted,
@@ -824,7 +824,7 @@ export class KimService {
 
       return feesAdjusted;
     } catch (error) {
-      console.error('Error in calculateFeesEarned:', error);
+      logger.error('Error in calculateFeesEarned:', error);
       throw error;
     }
   }
@@ -837,7 +837,7 @@ export class KimService {
       // Price is in terms of token1/token0
       const price = sqrtPrice * sqrtPrice;
 
-      console.log('Price calculation:', {
+      logger.log('Price calculation:', {
         sqrtPriceX96: sqrtPriceX96.toString(),
         sqrtPrice,
         price,
@@ -845,7 +845,7 @@ export class KimService {
 
       return price;
     } catch (error) {
-      console.error('Error in calculatePrice:', error);
+      logger.error('Error in calculatePrice:', error);
       throw error;
     }
   }
@@ -918,7 +918,7 @@ export class KimService {
         },
       };
     } catch (error) {
-      console.error('Error getting position details:', error);
+      logger.error('Error getting position details:', error);
       throw new Error(`Failed to get position details: ${error}`);
     }
   }
