@@ -106,7 +106,7 @@ export class MentionCronService implements OnModuleInit {
 
   async onModuleInit() {
     // Schedule a task to run every 15 minutes
-    cron.schedule('*/15 * * * *', async () => {
+    cron.schedule('*/2 * * * *', async () => {
       try {
         const botUsername = this.configService.get('TWITTER_BOT_USERNAME');
         console.log('Bot username:', botUsername);
