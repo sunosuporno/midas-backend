@@ -10,6 +10,7 @@ import {
   GetVotingPowerParameters,
   VoteOnGaugesParameters,
 } from './parameters';
+
 // Contract addresses for different voter types
 const VOTER_ADDRESSES = {
   veMODE: '0x71439Ae82068E19ea90e4F506c74936aE170Cf58',
@@ -25,6 +26,7 @@ const VOTING_ESCROW_ADDRESSES = {
   veMODE: '0xff8AB822b8A853b01F9a9E9465321d6Fe77c9D2F',
   veBPT: '0x9c2eFe2a1FBfb601125Bb07a3D5bC6EC91F91e01',
 } as const;
+
 // Interface for gauge information
 interface GaugeInfo {
   address: string;
@@ -51,7 +53,6 @@ export class ModeVotingService {
     voterType: keyof typeof VOTER_ADDRESSES;
     gauges: Array<{ address: string; name: string; votes: string }>;
   }> {
-    logger.log(`Getting all gauges for voter type: ${parameters.voterType}`);
     const voterAddress = VOTER_ADDRESSES[parameters.voterType];
     const DECIMALS = BigInt(10 ** 18);
     const result = {
@@ -68,7 +69,6 @@ export class ModeVotingService {
         args: [],
       });
       const gaugeAddresses = (gaugesResult as { value: string[] }).value;
-      logger.log(`Found ${gaugeAddresses.length} gauge addresses`);
 
       // Process each gauge
       result.gauges = await Promise.all(
@@ -102,11 +102,8 @@ export class ModeVotingService {
             const metadataUrl = `https://externalorgs.mypinata.cloud/ipfs/${ipfsHash}`;
             const metadata = await fetch(metadataUrl).then((res) => res.json());
             name = metadata.name || 'Unknown';
-          } catch (error) {
-            logger.warn(
-              `Failed to fetch metadata for gauge ${gaugeAddress}:`,
-              error,
-            );
+          } catch {
+            // Silently handle metadata fetch errors
           }
 
           return {
@@ -119,7 +116,6 @@ export class ModeVotingService {
 
       return result;
     } catch (error) {
-      logger.error('Error in getAllGauges:', error);
       throw new Error(
         `Failed to get gauges for ${parameters.voterType}: ${error}`,
       );
@@ -135,15 +131,11 @@ export class ModeVotingService {
     walletClient: EVMWalletClient,
     parameters: GetGaugeInfoParameters,
   ): Promise<GaugeInfo> {
-    logger.log(
-      `Getting gauge info for identifier: ${parameters.gaugeIdentifier}`,
-    );
     try {
       let gaugeAddress = parameters.gaugeIdentifier;
 
       // If not an address, search by name
       if (!parameters.isAddress) {
-        logger.log('Searching for gauge by name...');
         // Get all gauges first
         const allGauges = await this.getAllGauges(walletClient, {
           voterType: parameters.voterType,
@@ -161,13 +153,8 @@ export class ModeVotingService {
           );
         }
 
-        logger.log(
-          `Found matching gauge: ${matchingGauge.name} (${matchingGauge.address})`,
-        );
         gaugeAddress = matchingGauge.address;
       }
-
-      logger.log('voterType', parameters.voterType);
 
       const gaugeDataResult = await walletClient.read({
         address: VOTER_ADDRESSES[parameters.voterType] as `0x${string}`,
@@ -196,31 +183,16 @@ export class ModeVotingService {
       const votes = (votesResult as { value: bigint }).value;
       const DECIMALS = BigInt(10 ** 18);
 
-      logger.log('Raw votes BigInt:', votes);
-      logger.log('Decimal string:', votes.toString());
-      logger.log('After division:', (votes / DECIMALS).toString());
-      // Optional: Format with commas for better readability
-      logger.log(
-        'Formatted:',
-        Number(votes / DECIMALS).toLocaleString('en-US', {
-          maximumFractionDigits: 18,
-        }),
-      );
-
       // Fetch metadata
       let metadata = {};
       try {
         const metadataURI = gaugeData.metadataURI;
         const ipfsHash = metadataURI.replace('ipfs://', '');
         const metadataUrl = `https://externalorgs.mypinata.cloud/ipfs/${ipfsHash}`;
-        logger.log(
-          `Fetching metadata from URL: ${metadataUrl} (original URI: ${metadataURI})`,
-        );
         const response = await fetch(metadataUrl);
         metadata = await response.json();
-        logger.log(`Metadata fetched successfully:`, metadata);
-      } catch (error) {
-        logger.error(`Failed to fetch metadata:`, error);
+      } catch {
+        // Silently handle metadata fetch errors
       }
 
       // Find eligibility URL from resources if it exists
@@ -244,7 +216,6 @@ export class ModeVotingService {
 
       return gaugeInfo;
     } catch (error) {
-      logger.error(`Error in getGaugeInfo:`, error);
       throw Error(`Failed to get gauge info: ${error}`);
     }
   }
@@ -259,16 +230,6 @@ export class ModeVotingService {
     parameters: VoteOnGaugesParameters,
   ): Promise<string> {
     try {
-      logger.log('Received voting parameters:', {
-        voterType: parameters.voterType,
-        tokenId: parameters.tokenId,
-        votes: parameters.votes.map((vote) => ({
-          gaugeIdentifier: vote.gaugeIdentifier,
-          isAddress: vote.isAddress,
-          weight: vote.weight,
-        })),
-      });
-
       // Check if voting is active
       const clockAddress = CLOCK_ADDRESSES[parameters.voterType];
 
@@ -312,21 +273,10 @@ export class ModeVotingService {
 
           // If not an address, search by name
           if (!vote.isAddress) {
-            logger.log(`Searching for gauge by name: ${vote.gaugeIdentifier}`);
             const searchName = vote.gaugeIdentifier.toLowerCase();
-            logger.log('Available gauges and their names:');
-            allGauges.gauges.forEach((gauge) => {
-              logger.log(`- "${gauge.name}" (${gauge.address})`);
-            });
-
-            const matchingGauge = allGauges.gauges.find((gauge) => {
-              const gaugeName = gauge.name.toLowerCase();
-              const matches = gaugeName.includes(searchName);
-              logger.log(
-                `Comparing "${searchName}" with "${gaugeName}": ${matches}`,
-              );
-              return matches;
-            });
+            const matchingGauge = allGauges.gauges.find((gauge) =>
+              gauge.name.toLowerCase().includes(searchName),
+            );
 
             if (!matchingGauge) {
               throw new Error(
@@ -334,9 +284,6 @@ export class ModeVotingService {
               );
             }
 
-            logger.log(
-              `Found matching gauge: ${matchingGauge.name} (${matchingGauge.address})`,
-            );
             gaugeAddress = matchingGauge.address;
           }
 
@@ -366,7 +313,6 @@ export class ModeVotingService {
 
       return `Successfully voted with NFT ${parameters.tokenId}. Transaction: ${txHash.hash}`;
     } catch (error) {
-      logger.error(`Error in voteOnGauges:`, error);
       throw Error(`Failed to vote on gauges: ${error}`);
     }
   }
@@ -381,16 +327,6 @@ export class ModeVotingService {
     parameters: ChangeVotesParameters,
   ): Promise<string> {
     try {
-      logger.log('Received vote change parameters:', {
-        voterType: parameters.voterType,
-        tokenId: parameters.tokenId,
-        votes: parameters.votes.map((vote) => ({
-          gaugeIdentifier: vote.gaugeIdentifier,
-          isAddress: vote.isAddress,
-          weight: vote.weight,
-        })),
-      });
-
       const voterAddress = VOTER_ADDRESSES[parameters.voterType];
 
       // First reset existing votes
@@ -426,21 +362,10 @@ export class ModeVotingService {
 
           // If not an address, search by name
           if (!vote.isAddress) {
-            logger.log(`Searching for gauge by name: ${vote.gaugeIdentifier}`);
             const searchName = vote.gaugeIdentifier.toLowerCase();
-            logger.log('Available gauges and their names:');
-            allGauges.gauges.forEach((gauge) => {
-              logger.log(`- "${gauge.name}" (${gauge.address})`);
-            });
-
-            const matchingGauge = allGauges.gauges.find((gauge) => {
-              const gaugeName = gauge.name.toLowerCase();
-              const matches = gaugeName.includes(searchName);
-              logger.log(
-                `Comparing "${searchName}" with "${gaugeName}": ${matches}`,
-              );
-              return matches;
-            });
+            const matchingGauge = allGauges.gauges.find((gauge) =>
+              gauge.name.toLowerCase().includes(searchName),
+            );
 
             if (!matchingGauge) {
               throw new Error(
@@ -448,9 +373,6 @@ export class ModeVotingService {
               );
             }
 
-            logger.log(
-              `Found matching gauge: ${matchingGauge.name} (${matchingGauge.address})`,
-            );
             gaugeAddress = matchingGauge.address;
           }
 
@@ -479,7 +401,6 @@ export class ModeVotingService {
       });
       return `Successfully changed votes for NFT ${parameters.tokenId}. Reset tx: ${resetTx.hash}, Vote tx: ${voteTx.hash}`;
     } catch (error) {
-      logger.error(`Error in changeVotes:`, error);
       throw Error(`Failed to change votes: ${error}`);
     }
   }
