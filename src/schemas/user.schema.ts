@@ -14,6 +14,15 @@ export class User extends Document {
 
   @Prop({ type: [String], default: [] })
   approvedChains: string[];
+
+  @Prop()
+  farcasterFid?: string;
+
+  @Prop()
+  farcasterSignerUuid?: string;
+
+  @Prop()
+  farcasterEthAddress?: string;
 }
 
 export const UserSchema = SchemaFactory.createForClass(User);

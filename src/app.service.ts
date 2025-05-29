@@ -41,6 +41,7 @@ import { isSmartWalletChain } from './config/chains.config';
 import { SupportedChainType } from './config/chains.config';
 import { User } from './schemas/user.schema';
 import { TwitterApi } from 'twitter-api-v2';
+import { FarcasterConnectionDto } from './dto/farcaster-connection.dto';
 
 @Injectable()
 export class AppService {
@@ -1151,5 +1152,113 @@ export class AppService {
     }
 
     return formatted;
+  }
+
+  async connectFarcasterUser(
+    crossmintId: string,
+    farcasterConnectionDto: FarcasterConnectionDto,
+  ) {
+    try {
+      console.log('\n=== Connecting Farcaster User ===');
+      console.log('Timestamp:', new Date().toISOString());
+      console.log('Crossmint ID:', crossmintId);
+      console.log('Farcaster Details:', {
+        fid: farcasterConnectionDto.farcasterFid,
+        signerUuid: farcasterConnectionDto.farcasterSignerUuid,
+        ethAddress: farcasterConnectionDto.farcasterEthAddress,
+      });
+
+      // Find the user by crossmintId
+      console.log('\nLooking up user by Crossmint ID...');
+      const user = await this.userModel.findOne({ crossmintId });
+      if (!user) {
+        console.error('User not found with Crossmint ID:', crossmintId);
+        throw new HttpException('User not found', 404);
+      }
+      console.log('User found:', {
+        crossmintId: user.crossmintId,
+        existingFarcasterFid: user.farcasterFid,
+        existingFarcasterEthAddress: user.farcasterEthAddress,
+      });
+
+      // Update user with Farcaster details
+      console.log('\nUpdating user with Farcaster details...');
+      const updatedUser = await this.userModel.findOneAndUpdate(
+        { crossmintId },
+        {
+          farcasterFid: farcasterConnectionDto.farcasterFid,
+          farcasterSignerUuid: farcasterConnectionDto.farcasterSignerUuid,
+          farcasterEthAddress: farcasterConnectionDto.farcasterEthAddress,
+        },
+        { new: true },
+      );
+
+      console.log('User updated successfully:', {
+        crossmintId: updatedUser.crossmintId,
+        farcasterFid: updatedUser.farcasterFid,
+        farcasterEthAddress: updatedUser.farcasterEthAddress,
+      });
+
+      return {
+        message: 'Farcaster connection successful',
+        user: {
+          crossmintId: updatedUser.crossmintId,
+          farcasterFid: updatedUser.farcasterFid,
+          farcasterEthAddress: updatedUser.farcasterEthAddress,
+        },
+      };
+    } catch (error) {
+      console.error('\n=== Error in connectFarcasterUser ===');
+      console.error('Error details:', {
+        message: error.message,
+        status: error.status,
+        timestamp: new Date().toISOString(),
+      });
+      throw new HttpException(
+        error.message || 'Failed to connect Farcaster user',
+        error.status || 500,
+      );
+    }
+  }
+
+  async getFarcasterConnection(crossmintId: string) {
+    try {
+      console.log('\n=== Fetching Farcaster Connection Details ===');
+      console.log('Crossmint ID:', crossmintId);
+
+      // Find the user by crossmintId
+      const user = await this.userModel.findOne({ crossmintId });
+      if (!user) {
+        console.error('User not found with Crossmint ID:', crossmintId);
+        throw new HttpException('User not found', 404);
+      }
+
+      // Check if user has Farcaster details
+      const hasFarcasterConnection = Boolean(
+        user.farcasterFid && user.farcasterEthAddress,
+      );
+
+      console.log('User Farcaster status:', {
+        hasConnection: hasFarcasterConnection,
+        farcasterFid: user.farcasterFid,
+        farcasterEthAddress: user.farcasterEthAddress,
+      });
+
+      return {
+        hasFarcasterConnection,
+        farcasterDetails: hasFarcasterConnection
+          ? {
+              farcasterFid: user.farcasterFid,
+              farcasterEthAddress: user.farcasterEthAddress,
+            }
+          : null,
+      };
+    } catch (error) {
+      console.error('Error fetching Farcaster connection:', error);
+      throw new HttpException(
+        error.message || 'Failed to fetch Farcaster connection',
+        error.status || 500,
+      );
+    }
   }
 }
