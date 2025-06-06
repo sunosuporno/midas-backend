@@ -26,7 +26,6 @@ export class MentionCronService implements OnModuleInit {
   private lastProcessedTimestamp: string;
   private botUsername: string;
   private userId: string;
-  private userId: string;
 
   constructor(
     private configService: ConfigService,
