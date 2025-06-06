@@ -25,6 +25,7 @@ export class MentionCronService implements OnModuleInit {
   private twitterClient: TwitterApi;
   private lastProcessedTimestamp: string;
   private botUsername: string;
+  private userId: string;
 
   constructor(
     private configService: ConfigService,
@@ -36,6 +37,7 @@ export class MentionCronService implements OnModuleInit {
     // Initialize with current time
     this.lastProcessedTimestamp = new Date().toISOString();
     this.botUsername = this.configService.get('TWITTER_BOT_USERNAME');
+    this.userId = this.configService.get('TWITTER_USER_ID');
   }
 
   private cleanTweetText(text: string): string {
@@ -112,9 +114,8 @@ export class MentionCronService implements OnModuleInit {
         console.log('Bot username:', botUsername);
         console.log('Last processed timestamp:', this.lastProcessedTimestamp);
 
-        // Get user ID for the bot username
-        const user = await this.twitterClient.v2.userByUsername(botUsername);
-        const userId = user.data.id;
+        // Use userId from config instead of fetching every time
+        const userId = this.userId;
         console.log('User ID:', userId);
 
         // Fetch mentions for the bot user
