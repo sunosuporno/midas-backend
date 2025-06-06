@@ -11,72 +11,34 @@ export interface NetworkToolsConfig {
 }
 
 export const networkTools: Record<ChainType, NetworkToolsConfig> = {
-  mode: {
-    available: [
-      'erc20',
-      'modeVoting',
-      'kim',
-      'ironclad',
-      'tokenInfo',
-      'zeroEx',
-    ],
+  arbitrum: {
+    available: ['erc20', 'tokenInfo', 'zeroEx'],
     descriptions: {
       erc20: {
-        basic:
-          'I can help you with ERC20 token operations (USDC, USDT, MODE, WETH, ezETH, wrsETH)',
+        basic: 'I can help you with ERC20 token operations on Arbitrum',
         details: {
           'check balance':
-            "To check your token balance, just ask 'What's my MODE balance?' or 'Show my USDC balance'",
+            "To check your token balance, just ask 'What's my USDC balance on Arbitrum?'",
           transfer:
-            "To transfer tokens, say 'Send 10 USDC to 0x...' or 'Transfer 5 MODE to...'",
+            "To transfer tokens, say 'Send 10 USDC to 0x... on Arbitrum'",
           approve:
-            "To approve tokens, say 'Approve 100 USDC for contract 0x...'",
-        },
-      },
-      modeVoting: {
-        basic: "I can assist with Mode's governance system",
-        details: {
-          'view proposals':
-            "Ask 'Show me active proposals' or 'What can I vote on?'",
-          vote: "To vote, say 'Vote yes on proposal 1' or 'Vote no on the latest proposal'",
-        },
-      },
-      zeroEx: {
-        basic: 'I can help you swap tokens using 0x Protocol',
-        details: {
-          swap: "To swap tokens, say 'Swap 10 USDC to MODE' or 'Exchange 5 MODE for USDC'",
-          quote:
-            "To get a quote, ask 'What's the rate for swapping 10 USDC to MODE?'",
-        },
-      },
-      kim: {
-        basic: "I can help you interact with Kim Finance's protocol",
-        details: {
-          stake: "To stake tokens, say 'Stake 100 MODE in Kim Finance'",
-          rewards: "To check rewards, ask 'Show my Kim Finance rewards'",
-        },
-      },
-      ironclad: {
-        basic: "I can help you with Ironclad's protocol operations",
-        details: {
-          deposit: "To deposit, say 'Deposit 100 USDC to Ironclad'",
-          withdraw: "To withdraw, say 'Withdraw my funds from Ironclad'",
+            "To approve tokens, say 'Approve 100 USDC for contract 0x... on Arbitrum'",
         },
       },
       tokenInfo: {
-        basic: 'I can fetch token information and market data',
+        basic: 'I can fetch token information and market data on Arbitrum',
         details: {
-          price:
-            "To check prices, ask 'What's the price of MODE?' or 'Show USDC price'",
+          price: "To check prices, ask 'What's the price of USDC on Arbitrum?'",
           'market data':
-            "For market data, say 'Show MODE market data' or 'What's USDC market cap?'",
+            "For market data, say 'Show USDC market data on Arbitrum'",
         },
       },
-      merchantMoe: {
-        basic: "I can help you with Merchant Moe's marketplace",
+      zeroEx: {
+        basic: 'I can help you swap tokens using 0x Protocol on Arbitrum',
         details: {
-          trade: "To trade, say 'Trade 10 USDC for MODE on Merchant Moe'",
-          pool: "To check pools, ask 'Show Merchant Moe pools'",
+          swap: "To swap tokens, say 'Swap 10 USDC to ETH on Arbitrum'",
+          quote:
+            "To get a quote, ask 'What's the rate for swapping 10 USDC to ETH on Arbitrum?'",
         },
       },
     },
@@ -90,43 +52,23 @@ export const networkTools: Record<ChainType, NetworkToolsConfig> = {
           'check balance':
             "To check your token balance, just ask 'What's my USDC balance on Base?'",
           transfer: "To transfer tokens, say 'Send 10 USDC to 0x... on Base'",
+          approve:
+            "To approve tokens, say 'Approve 100 USDC for contract 0x... on Base'",
         },
       },
       tokenInfo: {
         basic: 'I can fetch token information and market data on Base',
         details: {
           price: "To check prices, ask 'What's the price of USDC on Base?'",
+          'market data': "For market data, say 'Show USDC market data on Base'",
         },
       },
       zeroEx: {
         basic: 'I can help you swap tokens using 0x Protocol on Base',
         details: {
           swap: "To swap tokens, say 'Swap 10 USDC to ETH on Base'",
-        },
-      },
-    },
-  },
-  mantle: {
-    available: ['erc20', 'tokenInfo', 'zeroEx'],
-    descriptions: {
-      erc20: {
-        basic: 'I can help you with ERC20 token operations on Mantle',
-        details: {
-          'check balance':
-            "To check your token balance, just ask 'What's my USDC balance on Mantle?'",
-          transfer: "To transfer tokens, say 'Send 10 USDC to 0x... on Mantle'",
-        },
-      },
-      tokenInfo: {
-        basic: 'I can fetch token information and market data on Mantle',
-        details: {
-          price: "To check prices, ask 'What's the price of USDC on Mantle?'",
-        },
-      },
-      zeroEx: {
-        basic: 'I can help you swap tokens using 0x Protocol on Mantle',
-        details: {
-          swap: "To swap tokens, say 'Swap 10 USDC to ETH on Mantle'",
+          quote:
+            "To get a quote, ask 'What's the rate for swapping 10 USDC to ETH on Base?'",
         },
       },
     },
@@ -174,16 +116,11 @@ export const getToolHelp = (chain: ChainType, query: string): string | null => {
     swap: 'zeroEx',
     exchange: 'zeroEx',
     trade: 'zeroEx',
-    vote: 'modeVoting',
-    proposal: 'modeVoting',
-    governance: 'modeVoting',
     balance: 'erc20',
     transfer: 'erc20',
     send: 'erc20',
-    stake: 'kim',
-    ironclad: 'ironclad',
-    merchant: 'merchantMoe',
     price: 'tokenInfo',
+    market: 'tokenInfo',
   };
 
   const matchedTool = Object.entries(toolMatches).find(([key]) =>

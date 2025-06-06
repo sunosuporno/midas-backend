@@ -16,6 +16,7 @@ import { AgentCallDto, AgentCallViemDto } from './dto/agent-call.dto';
 import { SaveMessageDto } from './dto/save-message.dto';
 import { CrossmintJwtGuard } from './guards/jwt.guard';
 import { Public } from './decorators/public.decorator';
+import { FarcasterConnectionDto } from './dto/farcaster-connection.dto';
 
 export class AgentViemCallDto {
   prompt: string;
@@ -176,6 +177,43 @@ export class AppController {
         agentCallViemDto.privateKey,
       );
     } catch (error) {
+      throw new HttpException(error.message, error.status || 500);
+    }
+  }
+
+  @Post('users/:crossmintId/farcaster')
+  async connectFarcasterUser(
+    @Param('crossmintId') crossmintId: string,
+    @Body() farcasterConnectionDto: FarcasterConnectionDto,
+  ) {
+    console.log('\n=== Farcaster Connection Request Received ===');
+    console.log('Crossmint ID from params:', crossmintId);
+    console.log('Request body:', farcasterConnectionDto);
+
+    try {
+      const result = await this.appService.connectFarcasterUser(
+        crossmintId,
+        farcasterConnectionDto,
+      );
+      console.log('Farcaster connection successful:', result);
+      return result;
+    } catch (error) {
+      console.error('Error in controller:', error);
+      throw new HttpException(error.message, error.status || 500);
+    }
+  }
+
+  @Get('users/:crossmintId/farcaster')
+  async getFarcasterConnection(@Param('crossmintId') crossmintId: string) {
+    console.log('\n=== Fetching Farcaster Connection Details ===');
+    console.log('Crossmint ID:', crossmintId);
+
+    try {
+      const result = await this.appService.getFarcasterConnection(crossmintId);
+      console.log('Farcaster details retrieved:', result);
+      return result;
+    } catch (error) {
+      console.error('Error fetching Farcaster details:', error);
       throw new HttpException(error.message, error.status || 500);
     }
   }

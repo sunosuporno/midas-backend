@@ -26,6 +26,7 @@ export class MentionCronService implements OnModuleInit {
   private lastProcessedTimestamp: string;
   private botUsername: string;
   private userId: string;
+  private userId: string;
 
   constructor(
     private configService: ConfigService,
@@ -37,6 +38,7 @@ export class MentionCronService implements OnModuleInit {
     // Initialize with current time
     this.lastProcessedTimestamp = new Date().toISOString();
     this.botUsername = this.configService.get('TWITTER_BOT_USERNAME');
+    this.userId = this.configService.get('TWITTER_USER_ID');
     this.userId = this.configService.get('TWITTER_USER_ID');
   }
 
