@@ -34,7 +34,7 @@ import { createCipheriv, randomBytes, createHash } from 'crypto';
 import { ApiKey } from './schemas/api-key.schema';
 import { createWalletClient, http } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
-import { mantle, mode, base } from 'viem/chains';
+import { base, arbitrum } from 'viem/chains';
 import { viem } from '@goat-sdk/wallet-viem';
 import { networkTools } from './config/network-tools.config';
 import { isSmartWalletChain } from './config/chains.config';
@@ -453,6 +453,29 @@ export class AppService {
       console.log('Chain:', chain);
       console.log('Wallet Address:', walletAddress);
 
+      // Check if user has approved this chain
+      const user = await this.userModel.findOne({ wallet: walletAddress });
+      if (!user?.approvedChains?.includes(chain)) {
+        const errorMessage = `Please approve the ${chain} network first before using it.`;
+        // Save the error message to chat history if sessionId exists
+        if (sessionId) {
+          await this.chatModel.findOneAndUpdate(
+            { walletAddress, sessionId },
+            {
+              $push: {
+                messages: {
+                  role: 'assistant',
+                  content: errorMessage,
+                  chain,
+                  timestamp: new Date(),
+                },
+              },
+            },
+          );
+        }
+        return { response: errorMessage };
+      }
+
       if (!isSmartWalletChain(chain)) {
         throw new HttpException(
           'This chain does not support smart wallet operations',
@@ -524,7 +547,7 @@ export class AppService {
           signer: {
             secretKey: walletSignerSecretKey as `0x${string}`,
           },
-          chain: chain,
+          chain: chain as SmartWalletChainType,
           provider: alchemyApiKey,
         }),
         plugins: [
@@ -665,6 +688,34 @@ export class AppService {
       console.log('Using wallet address:', walletAddress);
       console.log('chain', chain);
 
+      // Check if user has approved this chain
+      const user = await this.userModel.findOne({ wallet: walletAddress });
+      if (!user?.approvedChains?.includes(chain)) {
+        const errorMessage = `Please approve the ${chain} network first before using it.`;
+        // Get the latest session or create a new one
+        const latestChat = await this.chatModel
+          .findOne({ walletAddress })
+          .sort({ createdAt: -1 });
+        const sessionId = latestChat?.sessionId || uuidv4();
+
+        // Save the error message to chat history
+        await this.chatModel.findOneAndUpdate(
+          { walletAddress, sessionId },
+          {
+            $push: {
+              messages: {
+                role: 'assistant',
+                content: errorMessage,
+                chain,
+                timestamp: new Date(),
+              },
+            },
+          },
+          { upsert: true },
+        );
+        return { response: errorMessage, sessionId };
+      }
+
       // Get the chain configuration
       const chainConfig = this.chainConfigMap[chain];
       if (!chainConfig) {
@@ -747,7 +798,7 @@ export class AppService {
           signer: {
             secretKey: walletSignerSecretKey as `0x${string}`,
           },
-          chain: chain,
+          chain: chain as SmartWalletChainType,
           provider: alchemyApiKey,
         }),
         plugins: [
@@ -832,13 +883,9 @@ export class AppService {
     string,
     { rpcUrl: string; chain: any }
   > = {
-    mantle: {
-      rpcUrl: process.env.ALCHEMY_API_KEY_MANTLE,
-      chain: mantle,
-    },
-    mode: {
-      rpcUrl: process.env.ALCHEMY_API_KEY_MODE,
-      chain: mode,
+    arbitrum: {
+      rpcUrl: process.env.ALCHEMY_API_KEY_ARBITRUM,
+      chain: arbitrum,
     },
     base: {
       rpcUrl: process.env.ALCHEMY_API_KEY_BASE,
@@ -859,7 +906,36 @@ export class AppService {
       // Get the chain configuration
       const chainConfig = this.chainConfigMap[chain];
       if (!chainConfig) {
-        throw new Error(`Unsupported chain: ${chain}`);
+        const errorMessage = `Unsupported chain: ${chain}`;
+        // Get the latest session or create a new one
+        const latestChat = await this.chatModel
+          .findOne({
+            walletAddress: privateKeyToAccount(privateKey as `0x${string}`)
+              .address,
+          })
+          .sort({ createdAt: -1 });
+        const sessionId = latestChat?.sessionId || uuidv4();
+
+        // Save the error message to chat history
+        await this.chatModel.findOneAndUpdate(
+          {
+            walletAddress: privateKeyToAccount(privateKey as `0x${string}`)
+              .address,
+            sessionId,
+          },
+          {
+            $push: {
+              messages: {
+                role: 'assistant',
+                content: errorMessage,
+                chain,
+                timestamp: new Date(),
+              },
+            },
+          },
+          { upsert: true },
+        );
+        return { response: errorMessage, sessionId };
       }
 
       // Normalize private key format
@@ -926,17 +1002,69 @@ export class AppService {
         };
       } catch (error) {
         console.error('Error in generateText:', error);
-        throw new HttpException(
-          error.message || 'Failed to process agent request',
-          error.response?.status || 500,
+        const errorMessage = error.message || 'Failed to process agent request';
+        // Get the latest session or create a new one
+        const latestChat = await this.chatModel
+          .findOne({
+            walletAddress: privateKeyToAccount(privateKey as `0x${string}`)
+              .address,
+          })
+          .sort({ createdAt: -1 });
+        const sessionId = latestChat?.sessionId || uuidv4();
+
+        // Save the error message to chat history
+        await this.chatModel.findOneAndUpdate(
+          {
+            walletAddress: privateKeyToAccount(privateKey as `0x${string}`)
+              .address,
+            sessionId,
+          },
+          {
+            $push: {
+              messages: {
+                role: 'assistant',
+                content: errorMessage,
+                chain,
+                timestamp: new Date(),
+              },
+            },
+          },
+          { upsert: true },
         );
+        return { response: errorMessage, sessionId };
       }
     } catch (error) {
       console.error('Error in callAgentViem:', error);
-      throw new HttpException(
-        error.message || 'Failed to process agent request',
-        error.response?.status || 500,
+      const errorMessage = error.message || 'Failed to process agent request';
+      // Get the latest session or create a new one
+      const latestChat = await this.chatModel
+        .findOne({
+          walletAddress: privateKeyToAccount(privateKey as `0x${string}`)
+            .address,
+        })
+        .sort({ createdAt: -1 });
+      const sessionId = latestChat?.sessionId || uuidv4();
+
+      // Save the error message to chat history
+      await this.chatModel.findOneAndUpdate(
+        {
+          walletAddress: privateKeyToAccount(privateKey as `0x${string}`)
+            .address,
+          sessionId,
+        },
+        {
+          $push: {
+            messages: {
+              role: 'assistant',
+              content: errorMessage,
+              chain,
+              timestamp: new Date(),
+            },
+          },
+        },
+        { upsert: true },
       );
+      return { response: errorMessage, sessionId };
     }
   }
 
@@ -967,6 +1095,125 @@ export class AppService {
               console.error(
                 `No wallet found for Twitter user ${tweet.authorId}`,
               );
+              const errorMessage =
+                'No wallet found. Please connect your wallet first.';
+              // Get the latest session or create a new one
+              const latestChat = await this.chatModel
+                .findOne({ walletAddress: user?.wallet })
+                .sort({ createdAt: -1 });
+              const sessionId = latestChat?.sessionId || uuidv4();
+
+              // Save the error message to chat history
+              if (user?.wallet) {
+                await this.chatModel.findOneAndUpdate(
+                  { walletAddress: user.wallet, sessionId },
+                  {
+                    $push: {
+                      messages: {
+                        role: 'assistant',
+                        content: errorMessage,
+                        chain: 'base', // Default chain since we don't know which one they want
+                        timestamp: new Date(),
+                      },
+                    },
+                  },
+                  { upsert: true },
+                );
+              }
+              await twitterClient.v2.reply(errorMessage, tweet.id);
+              return null;
+            }
+
+            // Extract chain from the message using "on [network]" pattern
+            const chainMatch = tweet.text.match(/on\s+(arbitrum|base)/i);
+            const requestedChain = chainMatch
+              ? chainMatch[1].toLowerCase()
+              : null;
+
+            if (!requestedChain) {
+              const errorMessage =
+                "Please specify which network you want to use by adding 'on base' or 'on arbitrum' to your message.";
+              // Get the latest session or create a new one
+              const latestChat = await this.chatModel
+                .findOne({ walletAddress: user.wallet })
+                .sort({ createdAt: -1 });
+              const sessionId = latestChat?.sessionId || uuidv4();
+
+              // Save the error message to chat history
+              await this.chatModel.findOneAndUpdate(
+                { walletAddress: user.wallet, sessionId },
+                {
+                  $push: {
+                    messages: {
+                      role: 'assistant',
+                      content: errorMessage,
+                      chain: 'base', // Default chain since we don't know which one they want
+                      timestamp: new Date(),
+                    },
+                  },
+                },
+                { upsert: true },
+              );
+              await twitterClient.v2.reply(errorMessage, tweet.id);
+              return null;
+            }
+
+            // If multiple networks are mentioned, use the first one
+            if (
+              tweet.text.match(/on\s+(arbitrum|base).*on\s+(arbitrum|base)/i)
+            ) {
+              const message = `Multiple networks detected. Using ${requestedChain} for this request.`;
+              // Get the latest session or create a new one
+              const latestChat = await this.chatModel
+                .findOne({ walletAddress: user.wallet })
+                .sort({ createdAt: -1 });
+              const sessionId = latestChat?.sessionId || uuidv4();
+
+              // Save the message to chat history
+              await this.chatModel.findOneAndUpdate(
+                { walletAddress: user.wallet, sessionId },
+                {
+                  $push: {
+                    messages: {
+                      role: 'assistant',
+                      content: message,
+                      chain: requestedChain,
+                      timestamp: new Date(),
+                    },
+                  },
+                },
+                { upsert: true },
+              );
+              await twitterClient.v2.reply(message, tweet.id);
+            }
+
+            const chain = requestedChain;
+
+            // Check if user has approved this chain
+            if (!user.approvedChains?.includes(chain)) {
+              const errorMessage = `Please approve the ${chain} network first before using it.`;
+              // Get the latest session or create a new one
+              const latestChat = await this.chatModel
+                .findOne({ walletAddress: user.wallet })
+                .sort({ createdAt: -1 });
+              const sessionId = latestChat?.sessionId || uuidv4();
+
+              // Save the error message to chat history
+              await this.chatModel.findOneAndUpdate(
+                { walletAddress: user.wallet, sessionId },
+                {
+                  $push: {
+                    messages: {
+                      role: 'assistant',
+                      content: errorMessage,
+                      chain,
+                      timestamp: new Date(),
+                    },
+                  },
+                },
+                { upsert: true },
+              );
+              await twitterClient.v2.reply(errorMessage, tweet.id);
               return null;
             }
 
@@ -1002,7 +1249,7 @@ export class AppService {
                   messages: {
                     role: 'user',
                     content: tweet.text,
-                    chain: 'base',
+                    chain,
                     timestamp: new Date(),
                   },
                 },
@@ -1016,7 +1263,7 @@ export class AppService {
             const walletSignerSecretKey = this.configService.get<string>(
               'WALLET_SIGNER_SECRET_KEY',
             );
-            const chainConfig = this.chainConfigMap['base'];
+            const chainConfig = this.chainConfigMap[chain];
             const alchemyApiKey = chainConfig.rpcUrl;
 
             if (
@@ -1036,7 +1283,7 @@ export class AppService {
                 signer: {
                   secretKey: walletSignerSecretKey as `0x${string}`,
                 },
-                chain: 'base',
+                chain: chain as SmartWalletChainType,
                 provider: alchemyApiKey,
               }),
               plugins: [
@@ -1087,7 +1334,7 @@ export class AppService {
                     messages: {
                       role: 'assistant',
                       content: result.text,
-                      chain: 'base',
+                      chain,
                       timestamp: new Date(),
                     },
                   },

@@ -1,10 +1,9 @@
-import { base, mode, mantle } from 'viem/chains';
+import { base, arbitrum } from 'viem/chains';
 
 // All supported chains
 export const SUPPORTED_CHAINS = {
   base: base,
-  mode: mode,
-  mantle: mantle,
+  arbitrum: arbitrum,
 } as const;
 
 export type SupportedChainType = keyof typeof SUPPORTED_CHAINS;
@@ -12,7 +11,7 @@ export type SupportedChainType = keyof typeof SUPPORTED_CHAINS;
 // Only chains supported by smartwallet (crossmint)
 export const SMARTWALLET_CHAINS = {
   base: base,
-  mode: mode,
+  arbitrum: arbitrum,
 } as const;
 
 export type SupportedSmartWalletChainType = keyof typeof SMARTWALLET_CHAINS;
