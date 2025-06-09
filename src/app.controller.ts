@@ -7,6 +7,7 @@ import {
   HttpException,
   UseGuards,
   Headers,
+  Query,
 } from '@nestjs/common';
 import { AppService } from './app.service';
 import { CreateDelegatedKeyDto } from './dto/create-delegated-key.dto';
@@ -215,6 +216,24 @@ export class AppController {
       return result;
     } catch (error) {
       console.error('Error fetching Farcaster details:', error);
+      throw new HttpException(error.message, error.status || 500);
+    }
+  }
+
+  @Get('users')
+  async getUser(
+    @Query('wallet') wallet?: string,
+    @Query('crossmintId') crossmintId?: string,
+  ) {
+    console.log('\n=== User Details Request Received ===');
+    console.log('Query params:', { wallet, crossmintId });
+
+    try {
+      const result = await this.appService.getUser({ wallet, crossmintId });
+      console.log('User details retrieved:', result);
+      return result;
+    } catch (error) {
+      console.error('Error in controller:', error);
       throw new HttpException(error.message, error.status || 500);
     }
   }

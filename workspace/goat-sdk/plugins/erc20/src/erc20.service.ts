@@ -58,7 +58,7 @@ export class Erc20Service {
   @Tool({
     name: 'erc20_balance',
     description:
-      'Get the balance of an ERC20 token in base units and its USD value.',
+      'Get the balance of an ERC20 token in base units and its USD value. Output is in number of tokens (not in its base unit) and USD value.',
   })
   async getTokenBalance(
     walletClient: EVMWalletClient,
@@ -99,11 +99,12 @@ export class Erc20Service {
       const balanceInTokens =
         Number(rawBalance.value) / 10 ** parameters.tokenDecimals;
       const valueUSD = balanceInTokens * price;
+      console.log('balance in tokens', balanceInTokens);
+      console.log('price', price);
+      console.log('valueUSD', valueUSD);
+      console.log('rawBalance', rawBalance.value);
 
-      return {
-        balance: rawBalance.value.toString(),
-        valueUSD: valueUSD.toFixed(2),
-      };
+      return `Balance: ${balanceInTokens} tokens, Value: $${valueUSD.toFixed(2)}`;
     } catch (error) {
       console.error('Error fetching balance and price:', error);
       return {

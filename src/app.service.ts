@@ -15,16 +15,10 @@ import {
   erc20,
   MODE,
 } from '../workspace/goat-sdk/plugins/erc20/src';
-// import { modeVoting } from '../workspace/goat-sdk/plugins/mode-voting/src';
-// import { kim } from '../workspace/goat-sdk/plugins/kim/src';
-// import { ironclad } from '../workspace/goat-sdk/plugins/ironclad/src';
-// import { sendETH } from '@goat-sdk/wallet-evm';
 import { tokenInfo } from '../workspace/goat-sdk/plugins/token-info/src';
-// import { merchantMoe } from '../workspace/goat-sdk/plugins/merchant-moe/src';
 import { zeroEx } from '../workspace/goat-sdk/plugins/0x/src';
-// import { odos } from '../workspace/goat-sdk/plugins/Odos/src';
-// import { oneInch } from '../workspace/goat-sdk/plugins/1inch/src';
 import { openai } from '@ai-sdk/openai';
+import { tipping } from '../workspace/goat-sdk/plugins/tipping/src';
 import { ChainType, SmartWalletChainType } from './dto/agent-call.dto';
 import { Model } from 'mongoose';
 import { InjectModel } from '@nestjs/mongoose';
@@ -40,20 +34,99 @@ import { networkTools } from './config/network-tools.config';
 import { isSmartWalletChain } from './config/chains.config';
 import { SupportedChainType } from './config/chains.config';
 import { User } from './schemas/user.schema';
+import { PendingTip } from './schemas/pending-tip.schema';
 import { TwitterApi } from 'twitter-api-v2';
 import { FarcasterConnectionDto } from './dto/farcaster-connection.dto';
+import { SafeWalletService } from '../workspace/goat-sdk/plugins/tipping/src/safe-wallet.service';
 
 @Injectable()
 export class AppService {
+  private safeWalletService: SafeWalletService;
+
   constructor(
     @InjectModel(Chat.name) private chatModel: Model<Chat>,
     @InjectModel(ApiKey.name) private apiKeyModel: Model<ApiKey>,
     @InjectModel(User.name) private userModel: Model<User>,
+    @InjectModel(PendingTip.name) private pendingTipModel: Model<PendingTip>,
     private configService: ConfigService,
-  ) {}
+  ) {
+    this.safeWalletService = new SafeWalletService(
+      this.configService.get<string>('RPC_URL'),
+      this.configService.get<string>('SAFE_WALLET_SIGNER_PRIVATE_KEY'),
+      this.configService.get<string>('SAFE_WALLET_SIGNER_ADDRESS'),
+    );
+  }
 
   private readonly ENCRYPTION_KEY =
     this.configService.get<string>('ENCRYPTION_KEY');
+
+  private async fetchTwitterUsername(
+    twitterId: string,
+  ): Promise<string | null> {
+    try {
+      const twitterClient = new TwitterApi({
+        appKey: this.configService.get<string>('TWITTER_API_KEY'),
+        appSecret: this.configService.get<string>('TWITTER_API_SECRET'),
+        accessToken: this.configService.get<string>('TWITTER_ACCESS_TOKEN'),
+        accessSecret: this.configService.get<string>('TWITTER_ACCESS_SECRET'),
+      });
+
+      const user = await twitterClient.v2.user(twitterId);
+      return user.data?.username || null;
+    } catch (error) {
+      console.error('Error fetching Twitter username:', error);
+      return null;
+    }
+  }
+
+  private async updateUserWithTwitterDetails(
+    crossmintId: string,
+    twitterId: string,
+    wallet?: string,
+    chain?: string,
+  ) {
+    try {
+      // Use a transaction to ensure atomicity
+      const session = await this.userModel.startSession();
+      await session.withTransaction(async () => {
+        // Try to find user by crossmintId first
+        const existingUser = await this.userModel
+          .findOne({ crossmintId })
+          .session(session);
+
+        if (!existingUser) {
+          // For new users, fetch Twitter username and create user with all details
+          const twitterUsername = await this.fetchTwitterUsername(twitterId);
+
+          // Create new user
+          await this.userModel.create(
+            [
+              {
+                crossmintId,
+                twitterId,
+                twitterUsername,
+                wallet,
+                approvedChains: chain ? [chain] : [],
+              },
+            ],
+            { session },
+          );
+        } else {
+          // For existing users, only update the chain
+          if (chain) {
+            await this.userModel.updateOne(
+              { _id: existingUser._id },
+              { $addToSet: { approvedChains: chain } },
+              { session },
+            );
+          }
+        }
+      });
+    } catch (error) {
+      console.error('Error updating user with Twitter details:', error);
+      throw new HttpException('Failed to update user details', 500);
+    }
+  }
 
   private encrypt(text: string): string {
     // Generate a deterministic IV based on the input text
@@ -138,6 +211,11 @@ export class AppService {
         throw new HttpException('Invalid expiresAt timestamp', 400);
       }
 
+      // Validate chain
+      if (!createDelegatedKeyDto.chain) {
+        throw new HttpException('Chain is required', 400);
+      }
+
       console.log('chain:', createDelegatedKeyDto.chain);
 
       const body = {
@@ -176,34 +254,43 @@ export class AppService {
         const { crossmintId, twitterId, wallet } =
           createDelegatedKeyDto.userDetails;
 
-        // Check if this is the first chain being approved
-        const existingUser = await this.userModel.findOne({ crossmintId });
-
-        if (!existingUser) {
-          // Create new user
-          await this.userModel.create({
-            crossmintId,
-            twitterId,
-            wallet,
-            approvedChains: [createDelegatedKeyDto.chain],
-          });
-        } else {
-          // Update existing user's approved chains and optional fields
-          await this.userModel.updateOne(
-            { crossmintId },
-            {
-              $addToSet: { approvedChains: createDelegatedKeyDto.chain },
-              ...(twitterId && { twitterId }),
-              ...(wallet && { wallet }),
-            },
-          );
+        // Validate required fields
+        if (!crossmintId) {
+          throw new HttpException('Crossmint ID is required', 400);
         }
+
+        // Validate wallet address format if provided
+        if (wallet && !/^0x[a-fA-F0-9]{40}$/.test(wallet)) {
+          throw new HttpException('Invalid wallet address format', 400);
+        }
+
+        // Validate Twitter ID format if provided
+        if (twitterId && !/^\d+$/.test(twitterId)) {
+          throw new HttpException('Invalid Twitter ID format', 400);
+        }
+
+        // Update user with Twitter details
+        await this.updateUserWithTwitterDetails(
+          crossmintId,
+          twitterId,
+          wallet,
+          createDelegatedKeyDto.chain,
+        );
       } else {
         // If userDetails not present, update approvedChains by wallet address
-        await this.userModel.updateOne(
-          { wallet: walletLocator },
-          { $addToSet: { approvedChains: createDelegatedKeyDto.chain } },
-        );
+        try {
+          const result = await this.userModel.updateOne(
+            { wallet: walletLocator },
+            { $addToSet: { approvedChains: createDelegatedKeyDto.chain } },
+          );
+
+          if (result.matchedCount === 0) {
+            console.warn(`No user found with wallet address: ${walletLocator}`);
+          }
+        } catch (dbError) {
+          console.error('Database operation failed:', dbError);
+          throw new HttpException('Failed to update user details', 500);
+        }
       }
 
       const result = {
@@ -556,7 +643,6 @@ export class AppService {
               this.configService.get<string>('COINGECKO_API_KEY'),
           }),
           erc20({ tokens: [USDC, USDT, MODE, WETH, ezETH, wrsETH] }),
-          // odos(),
           zeroEx({
             apiKey: (() => {
               const key = this.configService.get<string>('ZEROX_API_KEY');
@@ -567,10 +653,12 @@ export class AppService {
               return key;
             })(),
           }),
-          // ironclad(),
-          // oneInch({
-          //   apiKey: this.configService.get<string>('1INCH_API_KEY'),
-          // }),
+          tipping(
+            this.userModel,
+            this.pendingTipModel,
+            this.configService.get<string>('RPC_URL'),
+            this.configService.get<string>('SAFE_WALLET_SIGNER_PRIVATE_KEY'),
+          ),
         ],
       });
 
@@ -807,12 +895,15 @@ export class AppService {
               this.configService.get<string>('COINGECKO_API_KEY'),
           }),
           erc20({ tokens: [USDC, USDT, MODE, WETH, ezETH, wrsETH] }),
-          // oneInch({
-          //   apiKey: this.configService.get<string>('1INCH_API_KEY'),
-          // }),
           zeroEx({
             apiKey: this.configService.get<string>('ZEROX_API_KEY'),
           }),
+          tipping(
+            this.userModel,
+            this.pendingTipModel,
+            this.configService.get<string>('RPC_URL'),
+            this.configService.get<string>('SAFE_WALLET_SIGNER_PRIVATE_KEY'),
+          ),
         ],
       });
 
@@ -964,14 +1055,15 @@ export class AppService {
             coingeckoApiKey:
               this.configService.get<string>('COINGECKO_API_KEY'),
           }),
-          // odos(),
           zeroEx({
             apiKey: this.configService.get<string>('ZEROX_API_KEY'),
           }),
-          // oneInch({
-          //   apiKey: this.configService.get<string>('1INCH_API_KEY'),
-          // }),
-          erc20({ tokens: [USDC, USDT, MODE, WETH, ezETH, wrsETH] }),
+          tipping(
+            this.userModel,
+            this.pendingTipModel,
+            this.configService.get<string>('RPC_URL'),
+            this.configService.get<string>('SAFE_WALLET_SIGNER_PRIVATE_KEY'),
+          ),
         ],
       });
 
@@ -1295,9 +1387,14 @@ export class AppService {
                 zeroEx({
                   apiKey: this.configService.get<string>('ZEROX_API_KEY'),
                 }),
-                // oneInch({
-                //   apiKey: this.configService.get<string>('1INCH_API_KEY'),
-                // }),
+                tipping(
+                  this.userModel,
+                  this.pendingTipModel,
+                  this.configService.get<string>('RPC_URL'),
+                  this.configService.get<string>(
+                    'SAFE_WALLET_SIGNER_PRIVATE_KEY',
+                  ),
+                ),
               ],
             });
 
@@ -1305,7 +1402,7 @@ export class AppService {
               model: openai('gpt-4o'),
               tools: tools,
               system:
-                'Your name is Midas, named after the fabled King whose touch turned things to gold. As an agent, you are the best DeFi assistant there is who can do all types of DeFi actions like swapping, staking, voting, etc. When you are asked to do any action, search the tools for the description which matches the action you are asked to do. If you find a match, use the tool to perform the action. Also, if a tool mentions to not call or call another tool in its description, make sure you follow the instructions. Be extremely, extremely careful with base units of each token, convert each token into its base units before performing swapping and other stuff. Send the data in markdown format.',
+                'Your name is Midas, named after the fabled King whose touch turned things to gold. As an agent, you are the best DeFi assistant there is who can do all types of DeFi actions like swapping, staking, voting, etc. When you are asked to do any action, search the tools for the description which matches the action you are asked to do. If you find a match, use the tool to perform the action. Also, if a tool mentions to not call or call another tool in its description, make sure you follow the instructions. Be extremely, extremely careful with base units of each token, convert each token into its base units before performing swapping and other stuff. Send the replies concisely, under 280 characters as you are replying on X',
               maxSteps: 12,
               prompt: contextualPrompt,
               onStepFinish: (event) => {
@@ -1504,6 +1601,49 @@ export class AppService {
       console.error('Error fetching Farcaster connection:', error);
       throw new HttpException(
         error.message || 'Failed to fetch Farcaster connection',
+        error.status || 500,
+      );
+    }
+  }
+
+  async getUser(identifier: { wallet?: string; crossmintId?: string }) {
+    try {
+      console.log('\n=== Fetching User Details ===');
+      console.log('Identifier:', identifier);
+
+      if (!identifier.wallet && !identifier.crossmintId) {
+        throw new HttpException(
+          'Either wallet or crossmintId must be provided',
+          400,
+        );
+      }
+
+      // Build query based on provided identifier
+      const query = identifier.wallet
+        ? { wallet: identifier.wallet }
+        : { crossmintId: identifier.crossmintId };
+
+      const user = await this.userModel.findOne(query);
+
+      // Return standardized response whether user exists or not
+      return {
+        exists: !!user,
+        user: user
+          ? {
+              crossmintId: user.crossmintId,
+              wallet: user.wallet,
+              twitterId: user.twitterId,
+              twitterUsername: user.twitterUsername,
+              approvedChains: user.approvedChains,
+              farcasterFid: user.farcasterFid,
+              farcasterEthAddress: user.farcasterEthAddress,
+            }
+          : null,
+      };
+    } catch (error) {
+      console.error('Error fetching user:', error);
+      throw new HttpException(
+        error.message || 'Failed to fetch user details',
         error.status || 500,
       );
     }
