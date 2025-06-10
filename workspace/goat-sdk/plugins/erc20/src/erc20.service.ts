@@ -130,6 +130,20 @@ export class Erc20Service {
         amount: parameters.amount.toString(),
       });
 
+      // Check token balance
+      const balance = await walletClient.read({
+        address: parameters.tokenAddress,
+        abi: ERC20_ABI,
+        functionName: 'balanceOf',
+        args: [walletClient.getAddress()],
+      });
+
+      if (BigInt(balance.value as string) < BigInt(parameters.amount)) {
+        throw new Error(
+          `Insufficient balance. Required: ${parameters.amount}, Available: ${balance.value}`,
+        );
+      }
+
       const to = parameters.to as `0x${string}`;
       console.log('Resolved recipient address:', to);
 
