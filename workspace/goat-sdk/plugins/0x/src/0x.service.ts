@@ -1,6 +1,6 @@
 import { Tool } from '@goat-sdk/core';
 import { EVMWalletClient } from '@goat-sdk/wallet-evm';
-import { Hex, concat, erc20Abi, maxUint256, numberToHex, size } from 'viem';
+import { erc20Abi, maxUint256, formatUnits } from 'viem';
 import { GetPriceParameters } from './parameters';
 
 export class Referrer {
@@ -116,6 +116,30 @@ export class ZeroExService {
       slippageBps: parameters.slippageBps,
     });
 
+    // check sell token balance
+    const sellTokenBalance = await walletClient.read({
+      address: parameters.sellToken,
+      abi: erc20Abi,
+      functionName: 'balanceOf',
+      args: [walletClient.getAddress()],
+    });
+
+    if (
+      BigInt(sellTokenBalance.value as string) < BigInt(parameters.sellAmount)
+    ) {
+      return `You don't have enough balance of ${parameters.sellToken}`;
+    }
+
+    // check buy token balance
+    const buyTokenBalanceRaw = await walletClient.read({
+      address: parameters.buyToken,
+      abi: erc20Abi,
+      functionName: 'balanceOf',
+      args: [walletClient.getAddress()],
+    });
+
+    const buyTokenBalance = BigInt(buyTokenBalanceRaw.value as string);
+
     const price = await this.getPrice(walletClient, parameters);
     console.log('Received price information:', price);
 
@@ -150,36 +174,6 @@ export class ZeroExService {
     });
     console.log('Received swap quote:', quote);
 
-    // let signature: Hex | undefined;
-
-    // if (quote.permit2?.eip712) {
-    //   console.log('EIP712 permit detected, generating signature...');
-    //   signature = (
-    //     await walletClient.signTypedData({
-    //       domain: {
-    //         ...quote.permit2.eip712.domain,
-    //         version: '1',
-    //       },
-    //       types: quote.permit2.eip712.types,
-    //       primaryType: quote.permit2.eip712.primaryType,
-    //       message: quote.permit2.eip712.message,
-    //     })
-    //   ).signature as Hex;
-    //   console.log('Generated signature:', signature);
-
-    //   const signatureLengthInHex = numberToHex(size(signature), {
-    //     signed: false,
-    //     size: 32,
-    //   });
-
-    //   const transactionData = quote.transaction.data as Hex;
-    //   const sigLengthHex = signatureLengthInHex as Hex;
-    //   const sig = signature as Hex;
-
-    //   quote.transaction.data = concat([transactionData, sigLengthHex, sig]);
-    //   console.log('Updated transaction data with signature');
-    // }
-
     const transaction = quote.transaction;
     console.log('Sending final transaction:', {
       to: transaction.to,
@@ -194,6 +188,33 @@ export class ZeroExService {
     });
 
     console.log('Swap transaction sent successfully with hash:', tx.hash);
-    return tx.hash;
+
+    // check new buy token balance
+    const newBuyTokenBalanceRaw = await walletClient.read({
+      address: parameters.buyToken,
+      abi: erc20Abi,
+      functionName: 'balanceOf',
+      args: [walletClient.getAddress()],
+    });
+
+    const newBuyTokenBalance = BigInt(newBuyTokenBalanceRaw.value as string);
+
+    const receivedAmountInBaseUnits = newBuyTokenBalance - buyTokenBalance;
+
+    // get decimals of buy token
+    const decimalsRaw = await walletClient.read({
+      address: parameters.buyToken,
+      abi: erc20Abi,
+      functionName: 'decimals',
+    });
+
+    const decimals = Number(decimalsRaw.value);
+
+    const receivedAmount = formatUnits(receivedAmountInBaseUnits, decimals);
+
+    return {
+      transactionHash: tx.hash,
+      receivedAmount,
+    };
   }
 }
