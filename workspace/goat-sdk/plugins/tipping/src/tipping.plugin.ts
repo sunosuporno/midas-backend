@@ -4,6 +4,7 @@ import { TippingService } from './tipping.service';
 import { Model } from 'mongoose';
 import { User } from '@/schemas/user.schema';
 import { PendingTip } from '@/schemas/pending-tip.schema';
+import { ethers } from 'ethers';
 
 const SUPPORTED_CHAINS = [
   '42161', // arbitrum

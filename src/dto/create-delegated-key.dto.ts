@@ -4,6 +4,7 @@ export class CreateDelegatedKeyDto {
   userDetails?: {
     crossmintId: string;
     twitterId?: string;
+    twitterUsername?: string;
     wallet?: string;
   };
 }

@@ -37,51 +37,24 @@ import { User } from './schemas/user.schema';
 import { PendingTip } from './schemas/pending-tip.schema';
 import { TwitterApi } from 'twitter-api-v2';
 import { FarcasterConnectionDto } from './dto/farcaster-connection.dto';
-import { SafeWalletService } from '../workspace/goat-sdk/plugins/tipping/src/safe-wallet.service';
 
 @Injectable()
 export class AppService {
-  private safeWalletService: SafeWalletService;
-
   constructor(
     @InjectModel(Chat.name) private chatModel: Model<Chat>,
     @InjectModel(ApiKey.name) private apiKeyModel: Model<ApiKey>,
     @InjectModel(User.name) private userModel: Model<User>,
     @InjectModel(PendingTip.name) private pendingTipModel: Model<PendingTip>,
     private configService: ConfigService,
-  ) {
-    this.safeWalletService = new SafeWalletService(
-      this.configService.get<string>('RPC_URL'),
-      this.configService.get<string>('SAFE_WALLET_SIGNER_PRIVATE_KEY'),
-      this.configService.get<string>('SAFE_WALLET_SIGNER_ADDRESS'),
-    );
-  }
+  ) {}
 
   private readonly ENCRYPTION_KEY =
     this.configService.get<string>('ENCRYPTION_KEY');
 
-  private async fetchTwitterUsername(
-    twitterId: string,
-  ): Promise<string | null> {
-    try {
-      const twitterClient = new TwitterApi({
-        appKey: this.configService.get<string>('TWITTER_API_KEY'),
-        appSecret: this.configService.get<string>('TWITTER_API_SECRET'),
-        accessToken: this.configService.get<string>('TWITTER_ACCESS_TOKEN'),
-        accessSecret: this.configService.get<string>('TWITTER_ACCESS_SECRET'),
-      });
-
-      const user = await twitterClient.v2.user(twitterId);
-      return user.data?.username || null;
-    } catch (error) {
-      console.error('Error fetching Twitter username:', error);
-      return null;
-    }
-  }
-
   private async updateUserWithTwitterDetails(
     crossmintId: string,
     twitterId: string,
+    twitterUsername: string,
     wallet?: string,
     chain?: string,
   ) {
@@ -95,10 +68,7 @@ export class AppService {
           .session(session);
 
         if (!existingUser) {
-          // For new users, fetch Twitter username and create user with all details
-          const twitterUsername = await this.fetchTwitterUsername(twitterId);
-
-          // Create new user
+          // Create new user with all details
           await this.userModel.create(
             [
               {
@@ -251,7 +221,7 @@ export class AppService {
 
       // Handle user details if provided
       if (createDelegatedKeyDto.userDetails) {
-        const { crossmintId, twitterId, wallet } =
+        const { crossmintId, twitterId, twitterUsername, wallet } =
           createDelegatedKeyDto.userDetails;
 
         // Validate required fields
@@ -273,6 +243,7 @@ export class AppService {
         await this.updateUserWithTwitterDetails(
           crossmintId,
           twitterId,
+          twitterUsername,
           wallet,
           createDelegatedKeyDto.chain,
         );
@@ -1061,7 +1032,7 @@ export class AppService {
           tipping(
             this.userModel,
             this.pendingTipModel,
-            this.configService.get<string>('RPC_URL'),
+            chainConfig.rpcUrl,
             this.configService.get<string>('SAFE_WALLET_SIGNER_PRIVATE_KEY'),
           ),
         ],
