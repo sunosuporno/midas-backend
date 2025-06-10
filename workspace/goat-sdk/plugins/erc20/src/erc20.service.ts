@@ -138,10 +138,20 @@ export class Erc20Service {
         args: [walletClient.getAddress()],
       });
 
-      if (BigInt(balance.value as string) < BigInt(parameters.amount)) {
-        throw new Error(
-          `Insufficient balance. Required: ${parameters.amount}, Available: ${balance.value}`,
-        );
+      const balanceValue = BigInt(balance.value as string);
+      const requestedAmount = BigInt(parameters.amount);
+
+      // If requested amount is within 99.99% of balance, use full balance
+      if (
+        balanceValue > BigInt(0) &&
+        requestedAmount * BigInt(10000) > balanceValue * BigInt(9999)
+      ) {
+        console.log('Adjusting to use full balance for transfer');
+        parameters.amount = balanceValue.toString();
+      } else if (balanceValue < requestedAmount) {
+        return `Insufficient balance. Required: ${parameters.amount}, Available: ${balance.value}`;
+      } else if (balanceValue === BigInt(0)) {
+        return `Cannot perform transfer with zero balance of token at ${parameters.tokenAddress}`;
       }
 
       const to = parameters.to as `0x${string}`;

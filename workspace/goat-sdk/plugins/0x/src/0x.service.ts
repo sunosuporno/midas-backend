@@ -124,10 +124,28 @@ export class ZeroExService {
       args: [walletClient.getAddress()],
     });
 
+    console.log('Balance check:', {
+      sellTokenBalance: sellTokenBalance.value,
+      sellAmount: parameters.sellAmount,
+      comparison:
+        BigInt(sellTokenBalance.value as string) <
+        BigInt(parameters.sellAmount),
+    });
+
+    const balance = BigInt(sellTokenBalance.value as string);
+    const requestedAmount = BigInt(parameters.sellAmount);
+
+    // If requested amount is within 99.99% of balance, use full balance
     if (
-      BigInt(sellTokenBalance.value as string) < BigInt(parameters.sellAmount)
+      balance > BigInt(0) &&
+      requestedAmount * BigInt(10000) > balance * BigInt(9999)
     ) {
-      return `You don't have enough balance of ${parameters.sellToken}`;
+      console.log('Adjusting to use full balance');
+      parameters.sellAmount = balance.toString();
+    } else if (balance < requestedAmount) {
+      return `Insufficient balance. Required: ${parameters.sellAmount}, Available: ${sellTokenBalance.value}`;
+    } else if (balance === BigInt(0)) {
+      return `Cannot perform swap with zero balance of ${parameters.sellToken}`;
     }
 
     // check buy token balance
