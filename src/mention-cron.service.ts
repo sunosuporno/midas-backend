@@ -109,6 +109,7 @@ export class MentionCronService implements OnModuleInit {
   async onModuleInit() {
     // Schedule a task to run every 15 minutes
     cron.schedule('*/2 * * * *', async () => {
+      console.log(`[${new Date().toISOString()}] Starting mention cron job`);
       try {
         const mentions = await this.twitterClient.v2.userMentionTimeline(
           this.userId,
@@ -119,26 +120,51 @@ export class MentionCronService implements OnModuleInit {
         );
 
         const tweets = mentions.data?.data || [];
+        console.log(
+          `[${new Date().toISOString()}] Found ${tweets.length} mentions`,
+        );
+
         if (tweets.length === 0) {
+          console.log(
+            `[${new Date().toISOString()}] No new mentions to process`,
+          );
           return;
         }
 
         // Get author IDs for all tweets
         const processedTweets = await this.getTweetAuthors(tweets);
+        console.log(
+          `[${new Date().toISOString()}] Processed ${processedTweets.length} tweets after filtering`,
+        );
 
         if (processedTweets.length === 0) {
+          console.log(
+            `[${new Date().toISOString()}] No tweets to process after filtering`,
+          );
           return;
         }
 
         // Process all tweets in batch
         await this.appService.callAgentTwitter(processedTweets);
+        console.log(
+          `[${new Date().toISOString()}] Successfully processed ${processedTweets.length} tweets`,
+        );
 
         // Update the last processed timestamp to current time
         this.lastProcessedTimestamp = new Date().toISOString();
+        console.log(
+          `[${new Date().toISOString()}] Updated last processed timestamp to ${this.lastProcessedTimestamp}`,
+        );
       } catch (error) {
-        // Error handling is done silently
+        console.error(
+          `[${new Date().toISOString()}] Error in mention cron job:`,
+          error,
+        );
         throw error;
       }
     });
+    console.log(
+      `[${new Date().toISOString()}] Mention cron job scheduled to run every 2 minutes`,
+    );
   }
 }
