@@ -58,7 +58,7 @@ export class Erc20Service {
   @Tool({
     name: 'erc20_balance',
     description:
-      'Get the balance of an ERC20 token in base units and its USD value.',
+      'Get the balance of an ERC20 token in base units and its USD value. Output is in number of tokens (not in its base unit) and USD value.',
   })
   async getTokenBalance(
     walletClient: EVMWalletClient,
@@ -98,11 +98,12 @@ export class Erc20Service {
       const balanceInTokens =
         Number(rawBalance.value) / 10 ** parameters.tokenDecimals;
       const valueUSD = balanceInTokens * price;
+      console.log('balance in tokens', balanceInTokens);
+      console.log('price', price);
+      console.log('valueUSD', valueUSD);
+      console.log('rawBalance', rawBalance.value);
 
-      return {
-        balance: rawBalance.value.toString(),
-        valueUSD: valueUSD.toFixed(2),
-      };
+      return `Balance: ${balanceInTokens} tokens, Value: $${valueUSD.toFixed(2)}`;
     } catch (error) {
       return {
         balance: '0',
@@ -121,6 +122,36 @@ export class Erc20Service {
     parameters: TransferParameters,
   ) {
     try {
+      console.log('Starting ERC20 transfer:', {
+        tokenAddress: parameters.tokenAddress,
+        toAddress: parameters.to,
+        amount: parameters.amount.toString(),
+      });
+
+      // Check token balance
+      const balance = await walletClient.read({
+        address: parameters.tokenAddress,
+        abi: ERC20_ABI,
+        functionName: 'balanceOf',
+        args: [walletClient.getAddress()],
+      });
+
+      const balanceValue = BigInt(balance.value as string);
+      const requestedAmount = BigInt(parameters.amount);
+
+      // If requested amount is within 99.99% of balance, use full balance
+      if (
+        balanceValue > BigInt(0) &&
+        requestedAmount * BigInt(10000) > balanceValue * BigInt(9999)
+      ) {
+        console.log('Adjusting to use full balance for transfer');
+        parameters.amount = balanceValue.toString();
+      } else if (balanceValue < requestedAmount) {
+        return `Insufficient balance. Required: ${parameters.amount}, Available: ${balance.value}`;
+      } else if (balanceValue === BigInt(0)) {
+        return `Cannot perform transfer with zero balance of token at ${parameters.tokenAddress}`;
+      }
+
       const to = parameters.to as `0x${string}`;
 
       const hash = await walletClient.sendTransaction({

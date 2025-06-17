@@ -10,6 +10,9 @@ export class User extends Document {
   twitterId?: string;
 
   @Prop()
+  twitterUsername?: string;
+
+  @Prop()
   wallet?: string;
 
   @Prop({ type: [String], default: [] })

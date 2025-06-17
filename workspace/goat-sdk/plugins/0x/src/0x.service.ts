@@ -1,6 +1,6 @@
 import { Tool } from '@goat-sdk/core';
 import { EVMWalletClient } from '@goat-sdk/wallet-evm';
-import { erc20Abi, maxUint256 } from 'viem';
+import { erc20Abi, maxUint256, formatUnits } from 'viem';
 import { GetPriceParameters } from './parameters';
 
 export class Referrer {
@@ -74,6 +74,55 @@ export class ZeroExService {
     description: 'Swap tokens using 0x',
   })
   async swap(walletClient: EVMWalletClient, parameters: GetPriceParameters) {
+    console.log('Starting swap operation with parameters:', {
+      sellToken: parameters.sellToken,
+      buyToken: parameters.buyToken,
+      sellAmount: parameters.sellAmount,
+      slippageBps: parameters.slippageBps,
+    });
+
+    // check sell token balance
+    const sellTokenBalance = await walletClient.read({
+      address: parameters.sellToken,
+      abi: erc20Abi,
+      functionName: 'balanceOf',
+      args: [walletClient.getAddress()],
+    });
+
+    console.log('Balance check:', {
+      sellTokenBalance: sellTokenBalance.value,
+      sellAmount: parameters.sellAmount,
+      comparison:
+        BigInt(sellTokenBalance.value as string) <
+        BigInt(parameters.sellAmount),
+    });
+
+    const balance = BigInt(sellTokenBalance.value as string);
+    const requestedAmount = BigInt(parameters.sellAmount);
+
+    // If requested amount is within 99.99% of balance, use full balance
+    if (
+      balance > BigInt(0) &&
+      requestedAmount * BigInt(10000) > balance * BigInt(9999)
+    ) {
+      console.log('Adjusting to use full balance');
+      parameters.sellAmount = balance.toString();
+    } else if (balance < requestedAmount) {
+      return `Insufficient balance. Required: ${parameters.sellAmount}, Available: ${sellTokenBalance.value}`;
+    } else if (balance === BigInt(0)) {
+      return `Cannot perform swap with zero balance of ${parameters.sellToken}`;
+    }
+
+    // check buy token balance
+    const buyTokenBalanceRaw = await walletClient.read({
+      address: parameters.buyToken,
+      abi: erc20Abi,
+      functionName: 'balanceOf',
+      args: [walletClient.getAddress()],
+    });
+
+    const buyTokenBalance = BigInt(buyTokenBalanceRaw.value as string);
+
     const price = await this.getPrice(walletClient, parameters);
 
     if (price.issues.allowance !== null) {
@@ -99,6 +148,7 @@ export class ZeroExService {
         swapFeeRecipient: this.referrer.swapFeeRecipient,
       }),
     });
+    console.log('Received swap quote:', quote);
 
     const transaction = quote.transaction;
     const tx = await walletClient.sendTransaction({
@@ -107,6 +157,34 @@ export class ZeroExService {
       data: transaction.data,
     });
 
-    return tx.hash;
+    console.log('Swap transaction sent successfully with hash:', tx.hash);
+
+    // check new buy token balance
+    const newBuyTokenBalanceRaw = await walletClient.read({
+      address: parameters.buyToken,
+      abi: erc20Abi,
+      functionName: 'balanceOf',
+      args: [walletClient.getAddress()],
+    });
+
+    const newBuyTokenBalance = BigInt(newBuyTokenBalanceRaw.value as string);
+
+    const receivedAmountInBaseUnits = newBuyTokenBalance - buyTokenBalance;
+
+    // get decimals of buy token
+    const decimalsRaw = await walletClient.read({
+      address: parameters.buyToken,
+      abi: erc20Abi,
+      functionName: 'decimals',
+    });
+
+    const decimals = Number(decimalsRaw.value);
+
+    const receivedAmount = formatUnits(receivedAmountInBaseUnits, decimals);
+
+    return {
+      transactionHash: tx.hash,
+      receivedAmount,
+    };
   }
 }

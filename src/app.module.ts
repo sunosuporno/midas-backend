@@ -10,6 +10,7 @@ import { ApiKey, ApiKeySchema } from './schemas/api-key.schema';
 // import { TwitterModule } from './twitter/twitter.module';
 import { MentionCronService } from './mention-cron.service';
 import { User, UserSchema } from './schemas/user.schema';
+import { PendingTip, PendingTipSchema } from './schemas/pending-tip.schema';
 
 @Module({
   imports: [
@@ -21,6 +22,7 @@ import { User, UserSchema } from './schemas/user.schema';
       { name: Chat.name, schema: ChatSchema },
       { name: ApiKey.name, schema: ApiKeySchema },
       { name: User.name, schema: UserSchema },
+      { name: PendingTip.name, schema: PendingTipSchema },
     ]),
     JwtModule.register({
       global: true,

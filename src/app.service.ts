@@ -18,6 +18,7 @@ import {
 import { tokenInfo } from '../workspace/goat-sdk/plugins/token-info/src';
 import { zeroEx } from '../workspace/goat-sdk/plugins/0x/src';
 import { openai } from '@ai-sdk/openai';
+import { tipping } from '../workspace/goat-sdk/plugins/tipping/src';
 import { ChainType, SmartWalletChainType } from './dto/agent-call.dto';
 import { Model } from 'mongoose';
 import { InjectModel } from '@nestjs/mongoose';
@@ -33,6 +34,7 @@ import { networkTools } from './config/network-tools.config';
 import { isSmartWalletChain } from './config/chains.config';
 import { SupportedChainType } from './config/chains.config';
 import { User } from './schemas/user.schema';
+import { PendingTip } from './schemas/pending-tip.schema';
 import { TwitterApi } from 'twitter-api-v2';
 import { FarcasterConnectionDto } from './dto/farcaster-connection.dto';
 
@@ -42,11 +44,59 @@ export class AppService {
     @InjectModel(Chat.name) private chatModel: Model<Chat>,
     @InjectModel(ApiKey.name) private apiKeyModel: Model<ApiKey>,
     @InjectModel(User.name) private userModel: Model<User>,
+    @InjectModel(PendingTip.name) private pendingTipModel: Model<PendingTip>,
     private configService: ConfigService,
   ) {}
 
   private readonly ENCRYPTION_KEY =
     this.configService.get<string>('ENCRYPTION_KEY');
+
+  private async updateUserWithTwitterDetails(
+    crossmintId: string,
+    twitterId: string,
+    twitterUsername: string,
+    wallet?: string,
+    chain?: string,
+  ) {
+    try {
+      // Use a transaction to ensure atomicity
+      const session = await this.userModel.startSession();
+      await session.withTransaction(async () => {
+        // Try to find user by crossmintId first
+        const existingUser = await this.userModel
+          .findOne({ crossmintId })
+          .session(session);
+
+        if (!existingUser) {
+          // Create new user with all details
+          await this.userModel.create(
+            [
+              {
+                crossmintId,
+                twitterId,
+                twitterUsername,
+                wallet,
+                approvedChains: chain ? [chain] : [],
+              },
+            ],
+            { session },
+          );
+        } else {
+          // For existing users, only update the chain
+          if (chain) {
+            await this.userModel.updateOne(
+              { _id: existingUser._id },
+              { $addToSet: { approvedChains: chain } },
+              { session },
+            );
+          }
+        }
+      });
+    } catch (error) {
+      console.error('Error updating user with Twitter details:', error);
+      throw new HttpException('Failed to update user details', 500);
+    }
+  }
 
   private encrypt(text: string): string {
     const hash = createHash('sha256').update(text).digest();
@@ -117,6 +167,13 @@ export class AppService {
         throw new HttpException('Invalid expiresAt timestamp', 400);
       }
 
+      // Validate chain
+      if (!createDelegatedKeyDto.chain) {
+        throw new HttpException('Chain is required', 400);
+      }
+
+      console.log('chain:', createDelegatedKeyDto.chain);
+
       const body = {
         chain: createDelegatedKeyDto.chain,
         expiresAt: expiresAt,
@@ -141,33 +198,47 @@ export class AppService {
       }
 
       if (createDelegatedKeyDto.userDetails) {
-        const { crossmintId, twitterId, wallet } =
+        const { crossmintId, twitterId, twitterUsername, wallet } =
           createDelegatedKeyDto.userDetails;
 
-        const existingUser = await this.userModel.findOne({ crossmintId });
-
-        if (!existingUser) {
-          await this.userModel.create({
-            crossmintId,
-            twitterId,
-            wallet,
-            approvedChains: [createDelegatedKeyDto.chain],
-          });
-        } else {
-          await this.userModel.updateOne(
-            { crossmintId },
-            {
-              $addToSet: { approvedChains: createDelegatedKeyDto.chain },
-              ...(twitterId && { twitterId }),
-              ...(wallet && { wallet }),
-            },
-          );
+        // Validate required fields
+        if (!crossmintId) {
+          throw new HttpException('Crossmint ID is required', 400);
         }
-      } else {
-        await this.userModel.updateOne(
-          { wallet: walletLocator },
-          { $addToSet: { approvedChains: createDelegatedKeyDto.chain } },
+
+        // Validate wallet address format if provided
+        if (wallet && !/^0x[a-fA-F0-9]{40}$/.test(wallet)) {
+          throw new HttpException('Invalid wallet address format', 400);
+        }
+
+        // Validate Twitter ID format if provided
+        if (twitterId && !/^\d+$/.test(twitterId)) {
+          throw new HttpException('Invalid Twitter ID format', 400);
+        }
+
+        // Update user with Twitter details
+        await this.updateUserWithTwitterDetails(
+          crossmintId,
+          twitterId,
+          twitterUsername,
+          wallet,
+          createDelegatedKeyDto.chain,
         );
+      } else {
+        // If userDetails not present, update approvedChains by wallet address
+        try {
+          const result = await this.userModel.updateOne(
+            { wallet: walletLocator },
+            { $addToSet: { approvedChains: createDelegatedKeyDto.chain } },
+          );
+
+          if (result.matchedCount === 0) {
+            console.warn(`No user found with wallet address: ${walletLocator}`);
+          }
+        } catch (dbError) {
+          console.error('Database operation failed:', dbError);
+          throw new HttpException('Failed to update user details', 500);
+        }
       }
 
       const result = {
@@ -453,6 +524,12 @@ export class AppService {
               return key;
             })(),
           }),
+          tipping(
+            this.userModel,
+            this.pendingTipModel,
+            this.configService.get<string>('RPC_URL'),
+            this.configService.get<string>('SAFE_WALLET_SIGNER_PRIVATE_KEY'),
+          ),
         ],
       });
 
@@ -654,6 +731,12 @@ export class AppService {
           zeroEx({
             apiKey: this.configService.get<string>('ZEROX_API_KEY'),
           }),
+          tipping(
+            this.userModel,
+            this.pendingTipModel,
+            this.configService.get<string>('RPC_URL'),
+            this.configService.get<string>('SAFE_WALLET_SIGNER_PRIVATE_KEY'),
+          ),
         ],
       });
 
@@ -778,7 +861,12 @@ export class AppService {
           zeroEx({
             apiKey: this.configService.get<string>('ZEROX_API_KEY'),
           }),
-          erc20({ tokens: [USDC, USDT, MODE, WETH, ezETH, wrsETH] }),
+          tipping(
+            this.userModel,
+            this.pendingTipModel,
+            chainConfig.rpcUrl,
+            this.configService.get<string>('SAFE_WALLET_SIGNER_PRIVATE_KEY'),
+          ),
         ],
       });
 
@@ -1082,6 +1170,14 @@ export class AppService {
                 zeroEx({
                   apiKey: this.configService.get<string>('ZEROX_API_KEY'),
                 }),
+                tipping(
+                  this.userModel,
+                  this.pendingTipModel,
+                  this.configService.get<string>('RPC_URL'),
+                  this.configService.get<string>(
+                    'SAFE_WALLET_SIGNER_PRIVATE_KEY',
+                  ),
+                ),
               ],
             });
 
@@ -1089,7 +1185,7 @@ export class AppService {
               model: openai('gpt-4o'),
               tools: tools,
               system:
-                'Your name is Midas, named after the fabled King whose touch turned things to gold. As an agent, you are the best DeFi assistant there is who can do all types of DeFi actions like swapping, staking, voting, etc. When you are asked to do any action, search the tools for the description which matches the action you are asked to do. If you find a match, use the tool to perform the action. Also, if a tool mentions to not call or call another tool in its description, make sure you follow the instructions. Be extremely, extremely careful with base units of each token, convert each token into its base units before performing swapping and other stuff. Send the data in markdown format.',
+                'Your name is Midas, named after the fabled King whose touch turned things to gold. As an agent, you are the best DeFi assistant there is who can do all types of DeFi actions like swapping, staking, voting, etc. When you are asked to do any action, search the tools for the description which matches the action you are asked to do. If you find a match, use the tool to perform the action. Also, if a tool mentions to not call or call another tool in its description, make sure you follow the instructions. Be extremely, extremely careful with base units of each token, convert each token into its base units before performing swapping and other stuff. Send the replies concisely, under 280 characters as you are replying on X',
               maxSteps: 12,
               prompt: contextualPrompt,
               onStepFinish: () => {},
@@ -1270,6 +1366,49 @@ export class AppService {
       console.error('Error fetching Farcaster connection:', error);
       throw new HttpException(
         error.message || 'Failed to fetch Farcaster connection',
+        error.status || 500,
+      );
+    }
+  }
+
+  async getUser(identifier: { wallet?: string; crossmintId?: string }) {
+    try {
+      console.log('\n=== Fetching User Details ===');
+      console.log('Identifier:', identifier);
+
+      if (!identifier.wallet && !identifier.crossmintId) {
+        throw new HttpException(
+          'Either wallet or crossmintId must be provided',
+          400,
+        );
+      }
+
+      // Build query based on provided identifier
+      const query = identifier.wallet
+        ? { wallet: identifier.wallet }
+        : { crossmintId: identifier.crossmintId };
+
+      const user = await this.userModel.findOne(query);
+
+      // Return standardized response whether user exists or not
+      return {
+        exists: !!user,
+        user: user
+          ? {
+              crossmintId: user.crossmintId,
+              wallet: user.wallet,
+              twitterId: user.twitterId,
+              twitterUsername: user.twitterUsername,
+              approvedChains: user.approvedChains,
+              farcasterFid: user.farcasterFid,
+              farcasterEthAddress: user.farcasterEthAddress,
+            }
+          : null,
+      };
+    } catch (error) {
+      console.error('Error fetching user:', error);
+      throw new HttpException(
+        error.message || 'Failed to fetch user details',
         error.status || 500,
       );
     }
