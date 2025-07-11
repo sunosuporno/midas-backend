@@ -36,7 +36,7 @@ export class ZeroExService {
     console.log('Making request to 0x API:', { path, queryParams });
 
     const filteredParams = Object.fromEntries(
-      Object.entries(queryParams).filter(([key, v]) => v !== undefined),
+      Object.entries(queryParams).filter(([, v]) => v !== undefined),
     ) as Record<string, string>;
 
     const url = new URL(
@@ -58,7 +58,21 @@ export class ZeroExService {
       console.error('0x API request failed:', {
         status: response.status,
         error: errorText,
+        url: url.toString(),
       });
+
+      // Try to parse the error for better debugging
+      try {
+        const errorData = JSON.parse(errorText);
+        if (errorData.name === 'SWAP_VALIDATION_FAILED') {
+          throw new Error(
+            `Swap validation failed. This could be due to insufficient liquidity, invalid token pair, or amount too small. Error: ${errorData.message}`,
+          );
+        }
+      } catch {
+        // If we can't parse the error, use the original error
+      }
+
       throw new Error(
         `Failed to fetch ${url}: ${JSON.stringify(errorText, null, 2)}`,
       );
@@ -83,7 +97,7 @@ export class ZeroExService {
       sellToken: parameters.sellToken,
       buyToken: parameters.buyToken,
       sellAmount: parameters.sellAmount,
-      slippageBps: parameters.slippageBps,
+      slippageBps: parameters.slippageBps ?? 100, // Show the actual value being used
     });
 
     const queryParams = {
@@ -93,7 +107,7 @@ export class ZeroExService {
       sellAmount: parameters.sellAmount,
       taker: walletClient.getAddress(),
       txOrigin: walletClient.getAddress(),
-      slippageBps: parameters.slippageBps?.toString(),
+      slippageBps: (parameters.slippageBps ?? 100).toString(), // Default to 100 BPS (1%) if not provided
       ...(this.referrer && {
         swapFeeBps: this.referrer.swapFeeBps.toString(),
         swapFeeToken: parameters.sellToken,
@@ -106,15 +120,23 @@ export class ZeroExService {
 
   @Tool({
     name: '0x_swap',
-    description: 'Swap tokens using 0x',
+    description:
+      'Swap tokens using 0x. Note: Ensure sufficient liquidity exists for the token pair and amount.',
   })
   async swap(walletClient: EVMWalletClient, parameters: GetPriceParameters) {
     console.log('Starting swap operation with parameters:', {
       sellToken: parameters.sellToken,
       buyToken: parameters.buyToken,
       sellAmount: parameters.sellAmount,
-      slippageBps: parameters.slippageBps,
+      slippageBps: parameters.slippageBps ?? 100, // Show the actual value being used
     });
+
+    // Validate that sell and buy tokens are different
+    if (
+      parameters.sellToken.toLowerCase() === parameters.buyToken.toLowerCase()
+    ) {
+      return `Cannot swap ${parameters.sellToken} for itself. Please specify different tokens.`;
+    }
 
     // check sell token balance
     const sellTokenBalance = await walletClient.read({
@@ -134,6 +156,12 @@ export class ZeroExService {
 
     const balance = BigInt(sellTokenBalance.value as string);
     const requestedAmount = BigInt(parameters.sellAmount);
+
+    // Check for minimum amount (some DEXes have minimum swap amounts)
+    const MIN_AMOUNT = BigInt(1000); // 1000 wei minimum
+    if (requestedAmount < MIN_AMOUNT) {
+      return `Amount too small for swap. Minimum amount: ${MIN_AMOUNT.toString()}, Requested: ${parameters.sellAmount}`;
+    }
 
     // If requested amount is within 99.99% of balance, use full balance
     if (
@@ -183,7 +211,7 @@ export class ZeroExService {
       sellAmount: parameters.sellAmount,
       taker: walletClient.getAddress(),
       txOrigin: walletClient.getAddress(),
-      slippageBps: parameters.slippageBps?.toString(),
+      slippageBps: (parameters.slippageBps ?? 100).toString(), // Default to 100 BPS (1%) if not provided
       ...(this.referrer && {
         swapFeeBps: this.referrer.swapFeeBps.toString(),
         swapFeeToken: parameters.sellToken,

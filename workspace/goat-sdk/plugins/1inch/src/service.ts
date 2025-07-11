@@ -6,7 +6,7 @@ import {
   BalanceServiceParams,
   SwapResponse,
 } from './types';
-import { erc20Abi, MaxFeePerGasTooLowError, maxUint256 } from 'viem';
+import { erc20Abi, maxUint256 } from 'viem';
 
 export class OneInchService {
   private readonly baseUrl: string;
@@ -15,6 +15,14 @@ export class OneInchService {
   constructor(params: BalanceServiceParams = {}) {
     this.baseUrl = params.baseUrl ?? 'https://api.1inch.dev';
     this.apiKey = params.apiKey;
+
+    // Debug logging for constructor
+    console.log('OneInchService initialized:', {
+      baseUrl: this.baseUrl,
+      hasApiKey: !!this.apiKey,
+      apiKeyLength: this.apiKey?.length || 0,
+      apiKeyPrefix: this.apiKey?.substring(0, 8) || 'none',
+    });
   }
 
   private async makeRequest<T>(
@@ -22,21 +30,45 @@ export class OneInchService {
     queryParams: Record<string, string | undefined> = {},
   ): Promise<T> {
     const filteredParams = Object.fromEntries(
-      Object.entries(queryParams).filter(([_, v]) => v !== undefined),
+      Object.entries(queryParams).filter(([, v]) => v !== undefined),
     ) as Record<string, string>;
 
     const url = new URL(`${this.baseUrl}${path}`);
     url.search = new URLSearchParams(filteredParams).toString();
 
-    const response = await fetch(url.toString(), {
-      headers: {
-        Accept: 'application/json',
-        ...(this.apiKey && { Authorization: `Bearer ${this.apiKey}` }),
-      },
+    // Debug logging
+    console.log('1inch API Request:', {
+      url: url.toString(),
+      hasApiKey: !!this.apiKey,
+      apiKeyLength: this.apiKey?.length || 0,
     });
 
+    const headers: Record<string, string> = {
+      Accept: 'application/json',
+    };
+
+    if (this.apiKey) {
+      headers.Authorization = `Bearer ${this.apiKey}`;
+    } else {
+      console.warn('1inch API key is missing!');
+    }
+
+    const response = await fetch(url.toString(), { headers });
+
     if (!response.ok) {
-      throw new Error(`Failed to fetch ${path}: ${response.statusText}`);
+      const errorText = await response
+        .text()
+        .catch(() => 'Unable to read error response');
+      console.error('1inch API Error:', {
+        status: response.status,
+        statusText: response.statusText,
+        url: url.toString(),
+        errorText,
+        hasApiKey: !!this.apiKey,
+      });
+      throw new Error(
+        `Failed to fetch ${path}: ${response.status} ${response.statusText} - ${errorText}`,
+      );
     }
 
     return response.json();

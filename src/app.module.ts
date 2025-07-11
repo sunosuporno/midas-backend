@@ -9,8 +9,16 @@ import { CrossmintJwtGuard } from './guards/jwt.guard';
 import { ApiKey, ApiKeySchema } from './schemas/api-key.schema';
 // import { TwitterModule } from './twitter/twitter.module';
 import { MentionCronService } from './mention-cron.service';
+import { AerodromeRebalancingCronService } from './aerodrome-rebalancing-cron.service';
+import { AerodromeRetryFailedMintsCronService } from './aerodrome-retry-failed-mints-cron.service';
 import { User, UserSchema } from './schemas/user.schema';
 import { PendingTip, PendingTipSchema } from './schemas/pending-tip.schema';
+import { AerodromeController } from './aerodrome/aerodrome.controller';
+import { AerodromeService } from './aerodrome/aerodrome.service';
+import {
+  AerodromePosition,
+  AerodromePositionSchema,
+} from './aerodrome/schemas/aerodrome-position.schema';
 
 @Module({
   imports: [
@@ -23,13 +31,21 @@ import { PendingTip, PendingTipSchema } from './schemas/pending-tip.schema';
       { name: ApiKey.name, schema: ApiKeySchema },
       { name: User.name, schema: UserSchema },
       { name: PendingTip.name, schema: PendingTipSchema },
+      { name: AerodromePosition.name, schema: AerodromePositionSchema },
     ]),
     JwtModule.register({
       global: true,
     }),
     // TwitterModule,
   ],
-  controllers: [AppController],
-  providers: [AppService, CrossmintJwtGuard, MentionCronService],
+  controllers: [AppController, AerodromeController],
+  providers: [
+    AppService,
+    AerodromeService,
+    CrossmintJwtGuard,
+    // MentionCronService,
+    AerodromeRebalancingCronService,
+    AerodromeRetryFailedMintsCronService,
+  ],
 })
 export class AppModule {}

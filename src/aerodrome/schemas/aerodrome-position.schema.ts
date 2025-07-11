@@ -1,0 +1,49 @@
+import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
+import { Document } from 'mongoose';
+
+export type AerodromePositionDocument = AerodromePosition & Document;
+
+@Schema({ timestamps: true })
+export class AerodromePosition {
+  @Prop({ required: true })
+  walletLocator: string;
+
+  @Prop({ required: true })
+  pool: string;
+
+  @Prop({ required: true })
+  usdcAmount: number;
+
+  @Prop({ required: true })
+  positionId: string;
+
+  @Prop({ required: true, default: 'pending' })
+  status:
+    | 'pending'
+    | 'active'
+    | 'failed'
+    | 'rebalancing'
+    | 'mint_failed'
+    | 'cleaned_up'
+    | 'cleanup_failed'
+    | 'retry_successful'
+    | 'retry_failed';
+
+  @Prop()
+  transactionHash?: string;
+
+  @Prop()
+  lpTokens?: number;
+
+  @Prop({ type: Object })
+  metadata?: Record<string, any>; // mintDetails now includes token0PriceAtMint and token1PriceAtMint
+
+  @Prop({ type: Object, default: { token0: '0', token1: '0' } })
+  collectedFees?: {
+    token0: string;
+    token1: string;
+  };
+}
+
+export const AerodromePositionSchema =
+  SchemaFactory.createForClass(AerodromePosition);

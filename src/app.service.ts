@@ -17,6 +17,7 @@ import {
 } from '../workspace/goat-sdk/plugins/erc20/src';
 import { tokenInfo } from '../workspace/goat-sdk/plugins/token-info/src';
 import { zeroEx } from '../workspace/goat-sdk/plugins/0x/src';
+import { oneInch } from '../workspace/goat-sdk/plugins/1inch/src';
 import { openai } from '@ai-sdk/openai';
 import { tipping } from '../workspace/goat-sdk/plugins/tipping/src';
 import { ChainType, SmartWalletChainType } from './dto/agent-call.dto';
@@ -26,7 +27,12 @@ import { Chat } from './schemas/chat.schema';
 import { v4 as uuidv4 } from 'uuid';
 import { createCipheriv, randomBytes, createHash } from 'crypto';
 import { ApiKey } from './schemas/api-key.schema';
-import { createWalletClient, http } from 'viem';
+import {
+  createWalletClient,
+  createPublicClient,
+  http,
+  encodeFunctionData,
+} from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import { base, arbitrum } from 'viem/chains';
 import { viem } from '@goat-sdk/wallet-viem';
@@ -37,6 +43,7 @@ import { User } from './schemas/user.schema';
 import { PendingTip } from './schemas/pending-tip.schema';
 import { TwitterApi } from 'twitter-api-v2';
 import { FarcasterConnectionDto } from './dto/farcaster-connection.dto';
+import { SendTransactionResponseDto } from './dto/send-transaction.dto';
 
 @Injectable()
 export class AppService {
@@ -619,6 +626,16 @@ export class AppService {
               const key = this.configService.get<string>('ZEROX_API_KEY');
               console.log(
                 'Debug - ZEROX_API_KEY value:',
+                key ? 'present' : 'undefined',
+              );
+              return key;
+            })(),
+          }),
+          oneInch({
+            apiKey: (() => {
+              const key = this.configService.get<string>('ONEINCH_API_KEY');
+              console.log(
+                'Debug - ONEINCH_API_KEY value:',
                 key ? 'present' : 'undefined',
               );
               return key;
@@ -1616,6 +1633,347 @@ export class AppService {
       throw new HttpException(
         error.message || 'Failed to fetch user details',
         error.status || 500,
+      );
+    }
+  }
+
+  // Dummy contract ABI for testing
+  private readonly DUMMY_CONTRACT_ABI = [
+    {
+      anonymous: false,
+      inputs: [
+        {
+          indexed: false,
+          internalType: 'uint256',
+          name: 'newValue',
+          type: 'uint256',
+        },
+      ],
+      name: 'ValueSet',
+      type: 'event',
+    },
+    {
+      inputs: [],
+      name: 'getValue',
+      outputs: [
+        {
+          internalType: 'uint256',
+          name: '',
+          type: 'uint256',
+        },
+      ],
+      stateMutability: 'view',
+      type: 'function',
+    },
+    {
+      inputs: [
+        {
+          internalType: 'uint256',
+          name: '_value',
+          type: 'uint256',
+        },
+      ],
+      name: 'setValue',
+      outputs: [],
+      stateMutability: 'nonpayable',
+      type: 'function',
+    },
+  ];
+
+  // Dummy contract address on Base
+  private readonly DUMMY_CONTRACT_ADDRESS =
+    '0xFEF533420Ace99437278E1570DABf2F59Dab3F39';
+
+  async sendTransaction(
+    walletLocator: string,
+  ): Promise<SendTransactionResponseDto> {
+    try {
+      console.log('=== Sending Dummy Contract Transaction via Crossmint ===');
+      console.log('Wallet Locator:', walletLocator);
+      console.log('Contract Address:', this.DUMMY_CONTRACT_ADDRESS);
+
+      const apiKey = this.configService.get<string>('CROSSMINT_SERVER_API_KEY');
+      const signerWallet = this.configService.get<string>('SIGNER_WALLET');
+      const signerPrivateKey = this.configService.get<string>(
+        'WALLET_SIGNER_SECRET_KEY',
+      );
+
+      if (!apiKey) {
+        throw new HttpException('CROSSMINT_SERVER_API_KEY not configured', 500);
+      }
+
+      if (!signerPrivateKey) {
+        throw new HttpException('WALLET_SIGNER_SECRET_KEY not configured', 500);
+      }
+
+      // Encode the function call data using viem - calling setValue with dummy value 42
+      const data = encodeFunctionData({
+        abi: this.DUMMY_CONTRACT_ABI,
+        functionName: 'setValue',
+        args: [42n], // Setting value to 42
+      });
+
+      console.log('Encoded Function Data:', data);
+
+      // Step 1: Create the transaction
+      console.log('Step 1: Creating transaction...');
+      const createResponse = await axios.post(
+        `https://www.crossmint.com/api/2022-06-09/wallets/${walletLocator}/transactions`,
+        {
+          params: {
+            calls: [
+              {
+                to: this.DUMMY_CONTRACT_ADDRESS,
+                value: '0', // No ETH value
+                data: data,
+              },
+            ],
+            chain: 'base', // Hardcoded chain
+            signer: signerWallet,
+          },
+        },
+        {
+          headers: {
+            'Content-Type': 'application/json',
+            'X-API-KEY': apiKey,
+          },
+        },
+      );
+      console.log('createResponse', createResponse);
+      console.log('Transaction Created:', createResponse.data);
+
+      console.log('Transaction ID:', createResponse.data.id);
+
+      const transactionId = createResponse.data.id;
+      let status = createResponse.data.status;
+
+      // If transaction is already completed, return the result
+      if (status === 'completed' || status === 'success') {
+        return {
+          id: transactionId,
+          status: status,
+          transactionHash: createResponse.data.transactionHash,
+        };
+      }
+
+      // Step 2: If transaction needs approval, sign and approve it
+      if (
+        status === 'awaiting-approval' &&
+        createResponse.data.approvals?.pending
+      ) {
+        console.log(
+          'Step 2: Transaction needs approval, signing and approving...',
+        );
+
+        const pendingApproval = createResponse.data.approvals.pending[0];
+        const messageToSign = pendingApproval.message;
+
+        if (!signerWallet) {
+          throw new HttpException('SIGNER_WALLET not configured', 500);
+        }
+
+        console.log('Message to sign:', messageToSign);
+        console.log('Signer:', signerWallet);
+
+        // Sign the message with the private key
+        const account = privateKeyToAccount(signerPrivateKey as `0x${string}`);
+        const alchemyApiKey = this.configService.get<string>(
+          'ALCHEMY_API_KEY_BASE',
+        );
+
+        if (!alchemyApiKey) {
+          throw new HttpException('ALCHEMY_API_KEY_BASE not configured', 500);
+        }
+
+        const walletClient = createWalletClient({
+          account,
+          transport: http(alchemyApiKey),
+        });
+
+        const signature = await walletClient.signMessage({
+          message: { raw: messageToSign as `0x${string}` },
+          account: account,
+        });
+
+        console.log('Signature generated:', signature);
+
+        console.log('Transaction ID:', transactionId);
+
+        // Step 3: Approve the transaction
+        console.log('Step 3: Approving transaction...');
+        const approveResponse = await axios.post(
+          `https://www.crossmint.com/api/2022-06-09/wallets/${walletLocator}/transactions/${transactionId}/approvals`,
+          {
+            approvals: [
+              {
+                signer: signerWallet,
+                signature: signature,
+              },
+            ],
+          },
+          {
+            headers: {
+              'Content-Type': 'application/json',
+              'X-API-KEY': apiKey,
+            },
+          },
+        );
+
+        console.log('Transaction Approved:', approveResponse.data);
+        status = approveResponse.data.status;
+      }
+
+      // Step 4: Poll for completion
+      console.log('Step 4: Polling for transaction completion...');
+      let finalStatus = status;
+      let attempts = 0;
+      const maxAttempts = 30; // 30 seconds max wait time
+
+      while (
+        attempts < maxAttempts &&
+        (finalStatus === 'pending' || finalStatus === 'awaiting-approval')
+      ) {
+        await new Promise((resolve) => setTimeout(resolve, 1000)); // Wait 1 second
+
+        try {
+          const statusResponse = await axios.get(
+            `https://www.crossmint.com/api/2022-06-09/wallets/${walletLocator}/transactions/${transactionId}`,
+            {
+              headers: {
+                'X-API-KEY': apiKey,
+                'Content-Type': 'application/json',
+              },
+            },
+          );
+
+          finalStatus = statusResponse.data.status;
+          console.log(`Poll attempt ${attempts + 1}: Status = ${finalStatus}`);
+
+          if (finalStatus === 'completed' || finalStatus === 'success') {
+            console.log('Transaction completed successfully!');
+            return {
+              id: transactionId,
+              status: finalStatus,
+              transactionHash:
+                statusResponse.data.onChain?.txId ||
+                statusResponse.data.transactionHash,
+            };
+          }
+        } catch (error) {
+          console.error(`Error polling transaction status:`, error);
+        }
+
+        attempts++;
+      }
+
+      // Return final status even if not completed
+      return {
+        id: transactionId,
+        status: finalStatus,
+        transactionHash: null,
+      };
+    } catch (error) {
+      console.error('Error sending transaction:', error);
+      throw new HttpException(
+        error.response?.data?.message || 'Failed to send transaction',
+        error.response?.status || 500,
+      );
+    }
+  }
+
+  async getTransactionStatus(walletLocator: string, transactionId: string) {
+    try {
+      console.log('=== Checking Transaction Status ===');
+      console.log('Wallet Locator:', walletLocator);
+      console.log('Transaction ID:', transactionId);
+
+      const apiKey = this.configService.get<string>('CROSSMINT_SERVER_API_KEY');
+
+      if (!apiKey) {
+        throw new HttpException('CROSSMINT_SERVER_API_KEY not configured', 500);
+      }
+
+      const response = await axios.get(
+        `https://www.crossmint.com/api/2022-06-09/wallets/${walletLocator}/transactions/${transactionId}`,
+        {
+          headers: {
+            'X-API-KEY': apiKey,
+            'Content-Type': 'application/json',
+          },
+        },
+      );
+
+      console.log('Transaction Status Response:', response.data);
+      return response.data;
+    } catch (error) {
+      console.error('Error checking transaction status:', error);
+      throw new HttpException(
+        error.response?.data?.message || 'Failed to check transaction status',
+        error.response?.status || 500,
+      );
+    }
+  }
+
+  async readContractValue(walletLocator: string): Promise<{ value: string }> {
+    try {
+      console.log('=== Reading Contract Value ===');
+      console.log('Wallet Locator:', walletLocator);
+      console.log('Contract Address:', this.DUMMY_CONTRACT_ADDRESS);
+
+      const apiKey = this.configService.get<string>('CROSSMINT_SERVER_API_KEY');
+      const alchemyApiKey = this.configService.get<string>(
+        'ALCHEMY_API_KEY_BASE',
+      );
+
+      if (!apiKey) {
+        throw new HttpException('CROSSMINT_SERVER_API_KEY not configured', 500);
+      }
+
+      if (!alchemyApiKey) {
+        throw new HttpException('ALCHEMY_API_KEY_BASE not configured', 500);
+      }
+
+      // Encode the function call data for getValue() - no parameters needed
+      const data = encodeFunctionData({
+        abi: this.DUMMY_CONTRACT_ABI,
+        functionName: 'getValue',
+        args: [], // getValue takes no parameters
+      });
+
+      console.log('Encoded Function Data for getValue:', data);
+
+      // Create a wallet client to read from the contract
+      const publicClient = createPublicClient({
+        transport: http(alchemyApiKey),
+        chain: base,
+      });
+
+      // Call the contract to read the value
+      const result = await publicClient.call({
+        to: this.DUMMY_CONTRACT_ADDRESS as `0x${string}`,
+        data: data as `0x${string}`,
+      });
+
+      console.log('Raw result from contract:', result);
+
+      // Decode the result (getValue returns a uint256)
+      if (result.data) {
+        // The result.data is a hex string, we need to decode it
+        // For uint256, we can convert it directly
+        const value = BigInt(result.data);
+        console.log('Decoded value:', value.toString());
+
+        return {
+          value: value.toString(),
+        };
+      } else {
+        throw new Error('No data returned from contract');
+      }
+    } catch (error) {
+      console.error('Error reading contract value:', error);
+      throw new HttpException(
+        error.message || 'Failed to read contract value',
+        error.response?.status || 500,
       );
     }
   }

@@ -18,6 +18,9 @@ import { SaveMessageDto } from './dto/save-message.dto';
 import { CrossmintJwtGuard } from './guards/jwt.guard';
 import { Public } from './decorators/public.decorator';
 import { FarcasterConnectionDto } from './dto/farcaster-connection.dto';
+import { SendTransactionResponseDto } from './dto/send-transaction.dto';
+import { logViewer } from './utils/log-viewer';
+import { logger } from './utils/logger';
 
 export class AgentViemCallDto {
   prompt: string;
@@ -236,5 +239,137 @@ export class AppController {
       console.error('Error in controller:', error);
       throw new HttpException(error.message, error.status || 500);
     }
+  }
+
+  @Public()
+  @Post('wallets/:walletLocator/transactions')
+  async sendTransaction(
+    @Param('walletLocator') walletLocator: string,
+  ): Promise<SendTransactionResponseDto> {
+    try {
+      return await this.appService.sendTransaction(walletLocator);
+    } catch (error) {
+      throw new HttpException(error.message, error.status || 500);
+    }
+  }
+
+  @Public()
+  @Get('wallets/:walletLocator/transactions/:transactionId')
+  async getTransactionStatus(
+    @Param('walletLocator') walletLocator: string,
+    @Param('transactionId') transactionId: string,
+  ) {
+    try {
+      return await this.appService.getTransactionStatus(
+        walletLocator,
+        transactionId,
+      );
+    } catch (error) {
+      throw new HttpException(error.message, error.status || 500);
+    }
+  }
+
+  @Public()
+  @Get('wallets/:walletLocator/contract-value')
+  async readContractValue(@Param('walletLocator') walletLocator: string) {
+    try {
+      return await this.appService.readContractValue(walletLocator);
+    } catch (error) {
+      throw new HttpException(error.message, error.status || 500);
+    }
+  }
+
+  // Log viewing endpoints (only available in development)
+  @Get('logs')
+  getLogFiles() {
+    if (process.env.NODE_ENV === 'production') {
+      return { error: 'Log viewing not available in production' };
+    }
+
+    const logFiles = logViewer.getLogFiles();
+    const logFilesWithInfo = logFiles.map((filename) => {
+      const info = logViewer.getLogFileInfo(filename);
+      return {
+        filename,
+        ...info,
+      };
+    });
+
+    return {
+      logFiles: logFilesWithInfo,
+      currentLogFile: logger.getLogFilePath(),
+      fileLoggingEnabled: logger.isFileLoggingEnabled(),
+    };
+  }
+
+  @Get('logs/latest')
+  getLatestLogs(@Query('lines') lines: string = '100') {
+    if (process.env.NODE_ENV === 'production') {
+      return { error: 'Log viewing not available in production' };
+    }
+
+    const lineCount = parseInt(lines, 10) || 100;
+    const logLines = logViewer.readLatestLog(lineCount);
+
+    return {
+      lines: logLines,
+      totalLines: logLines.length,
+      requestedLines: lineCount,
+    };
+  }
+
+  @Get('logs/:filename')
+  getLogFile(
+    @Param('filename') filename: string,
+    @Query('lines') lines: string = '100',
+  ) {
+    if (process.env.NODE_ENV === 'production') {
+      return { error: 'Log viewing not available in production' };
+    }
+
+    const lineCount = parseInt(lines, 10) || 100;
+    const logLines = logViewer.readLogFile(filename, lineCount);
+
+    return {
+      filename,
+      lines: logLines,
+      totalLines: logLines.length,
+      requestedLines: lineCount,
+    };
+  }
+
+  @Get('logs/search/:term')
+  searchLogs(
+    @Param('term') searchTerm: string,
+    @Query('filename') filename?: string,
+  ) {
+    if (process.env.NODE_ENV === 'production') {
+      return { error: 'Log viewing not available in production' };
+    }
+
+    const results = logViewer.searchLogs(searchTerm, filename);
+
+    return {
+      searchTerm,
+      filename: filename || 'all',
+      results,
+      totalResults: results.length,
+    };
+  }
+
+  @Get('logs/cleanup')
+  cleanupLogs(@Query('days') days: string = '7') {
+    if (process.env.NODE_ENV === 'production') {
+      return { error: 'Log cleanup not available in production' };
+    }
+
+    const daysToKeep = parseInt(days, 10) || 7;
+    const result = logViewer.clearOldLogs(daysToKeep);
+
+    return {
+      message: `Cleaned up old log files`,
+      daysKept: daysToKeep,
+      ...result,
+    };
   }
 }

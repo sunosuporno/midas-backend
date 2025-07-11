@@ -113,6 +113,7 @@ export class MentionCronService implements OnModuleInit {
         const botUsername = this.configService.get('TWITTER_BOT_USERNAME');
         console.log('Bot username:', botUsername);
         console.log('Last processed timestamp:', this.lastProcessedTimestamp);
+        console.log('current time', new Date().toISOString());
 
         // Use userId from config instead of fetching every time
         const userId = this.userId;
@@ -126,6 +127,7 @@ export class MentionCronService implements OnModuleInit {
             start_time: this.lastProcessedTimestamp, // Only get tweets after last processed time
           },
         );
+        console.log('mentions', mentions);
 
         const tweets = mentions.data?.data || [];
         if (tweets.length === 0) {

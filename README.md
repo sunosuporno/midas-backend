@@ -97,3 +97,134 @@ Nest is an MIT-licensed open source project. It can grow thanks to the sponsors 
 ## License
 
 Nest is [MIT licensed](https://github.com/nestjs/nest/blob/master/LICENSE).
+
+# Midas Backend
+
+A NestJS backend service for managing Aerodrome LP positions and automated rebalancing.
+
+## Features
+
+- **Aerodrome LP Position Management**: Create, monitor, and manage liquidity positions
+- **Automated Rebalancing**: Intelligent rebalancing based on multiple conditions
+- **Multi-DEX Support**: 0x API with 1inch fallback for token swaps
+- **Crossmint Integration**: Secure wallet management and transaction execution
+- **Real-time Monitoring**: Position tracking and fee collection
+
+## Environment Variables
+
+### Required Variables
+
+```env
+# Crossmint Configuration
+CROSSMINT_SERVER_API_KEY=your_crossmint_api_key
+WALLET_SIGNER_SECRET_KEY=your_signer_private_key
+SIGNER_WALLET=your_signer_wallet_address
+
+# Blockchain Configuration
+ALCHEMY_API_KEY_BASE=your_alchemy_base_api_key
+
+# DEX API Keys (at least one required)
+ZEROX_API_KEY=your_0x_api_key
+ONEINCH_API_KEY=your_1inch_api_key
+
+# Database
+MONGODB_URI=your_mongodb_connection_string
+```
+
+### DEX Integration
+
+The service supports multiple DEX aggregators for token swaps:
+
+- **0x API** (Primary): Used as the first choice for swaps
+- **1inch API** (Fallback): Automatically used if 0x fails
+
+Both APIs are used for:
+
+- Getting swap quotes
+- Executing token swaps
+- Price discovery
+
+The system will automatically try 0x first, then fall back to 1inch if 0x fails, ensuring high availability for swap operations.
+
+## API Endpoints
+
+### Core Endpoints
+
+- `POST /aerodrome/mint` - Create new LP position
+- `GET /aerodrome/position/:positionId` - Get position details
+- `GET /aerodrome/positions/:walletLocator` - Get all positions for wallet
+- `POST /aerodrome/burn` - Close and burn position
+- `POST /aerodrome/collect-fees` - Collect accumulated fees
+
+### Utility Endpoints
+
+- `GET /aerodrome/pools` - Get available pools
+- `GET /aerodrome/quote` - Get swap quote
+- `POST /aerodrome/test-1inch` - Test 1inch integration
+- `POST /aerodrome/retry-failed-mints` - Retry failed mint operations
+
+## Installation
+
+```bash
+npm install
+npm run build
+npm run start:dev
+```
+
+## Usage
+
+### Creating an LP Position
+
+```bash
+curl -X POST http://localhost:3000/aerodrome/mint \
+  -H "Content-Type: application/json" \
+  -d '{
+    "walletLocator": "evm-base:0x...",
+    "pool": "weth-usdc",
+    "usdcAmount": 100
+  }'
+```
+
+### Testing 1inch Integration
+
+```bash
+curl -X POST http://localhost:3000/aerodrome/test-1inch \
+  -H "Content-Type: application/json" \
+  -d '{
+    "walletLocator": "evm-base:0x...",
+    "sellToken": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+    "buyToken": "0x4200000000000000000000000000000000000006",
+    "amount": "1000000"
+  }'
+```
+
+## Architecture
+
+The service uses a modular architecture with:
+
+- **AerodromeService**: Core business logic for LP management
+- **Crossmint Integration**: Secure wallet and transaction management
+- **Multi-DEX Support**: 0x and 1inch for reliable token swaps
+- **Automated Rebalancing**: Cron-based position monitoring and rebalancing
+- **MongoDB**: Position and transaction data storage
+
+## Rebalancing Logic
+
+Positions are automatically rebalanced based on:
+
+1. **Out of Range**: Current price outside position's tick range
+2. **Dollar Value Loss**: Position value below 95% of original
+3. **Token Imbalance**: One token >80% or <20% of total value
+4. **Age Limit**: Positions older than 2 days
+
+## Contributing
+
+1. Fork the repository
+2. Create a feature branch
+3. Make your changes
+4. Add tests
+5. Submit a pull request
+
+## License
+
+MIT
