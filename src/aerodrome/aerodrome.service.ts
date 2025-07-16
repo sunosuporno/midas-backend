@@ -1386,13 +1386,20 @@ export class AerodromeService {
             },
           );
 
-          // Clean up the failed position - let cleanup function handle its own errors
+          // Clean up the failed position and attempt immediate retry
           // Pass the actual amounts that were used in the mint, not the original intended amounts
-          await this.cleanupFailedMint(
+          const cleanupResult = await this.cleanupFailedMint(
             positionId,
             actualAmount0Used,
             actualAmount1Used,
+            true, // Enable immediate retry
           );
+
+          // If retry was successful, return the retry result
+          if (cleanupResult.retrySuccessful) {
+            console.log(`✅ Position ${positionId} successfully retried`);
+            return cleanupResult;
+          }
 
           console.log(`Position ${positionId} cleaned up after mint failure`);
         } catch (updateError) {
@@ -4076,6 +4083,7 @@ export class AerodromeService {
     positionId: string,
     actualToken0Amount: string,
     actualToken1Amount: string,
+    shouldRetry: boolean = false,
   ) {
     try {
       console.log(`=== Cleaning up failed mint for position ${positionId} ===`);
@@ -4169,11 +4177,11 @@ export class AerodromeService {
         totalUSDValue: totalUSDValue.toFixed(2),
       });
 
-      // Store token amounts and USD values for retry (no swapping)
+      // Store token amounts and USD values for immediate retry
       await this.aerodromePositionModel.findOneAndUpdate(
         { positionId },
         {
-          status: 'ready_for_retry',
+          status: 'cleanup_completed',
           metadata: {
             ...position.metadata,
             retryMetadata: {
@@ -4196,6 +4204,85 @@ export class AerodromeService {
       );
 
       console.log(`=== Cleanup completed for position ${positionId} ===`);
+
+      // If this is a retry scenario, attempt immediate retry
+      if (shouldRetry) {
+        console.log(`Attempting immediate retry for position ${positionId}...`);
+
+        try {
+          // Get the original position data for retry
+          const originalPosition = await this.aerodromePositionModel.findOne({
+            positionId,
+          });
+
+          if (!originalPosition) {
+            throw new Error('Original position not found for retry');
+          }
+
+          // Create retry DTO with the stored token amounts
+          const retryDto = new CreateAerodromeLpDto();
+          Object.assign(retryDto, {
+            walletLocator: originalPosition.walletLocator,
+            pool: originalPosition.pool,
+            usdcAmount: totalUSDValue, // Use the calculated USD value
+            description: `Retry of failed position ${positionId}`,
+            rebalancedPositionId:
+              originalPosition.metadata?.rebalancedPositionId || null,
+            percentDeviation:
+              originalPosition.metadata?.tickRange?.percentDeviation || 1.5,
+            isRebalanceOrRetry: true,
+            positionId: positionId, // Pass the position ID to get stored token amounts
+          });
+
+          console.log('Retry DTO created:', {
+            walletLocator: retryDto.walletLocator,
+            pool: retryDto.pool,
+            usdcAmount: retryDto.usdcAmount,
+            percentDeviation: retryDto.percentDeviation,
+          });
+
+          // Attempt the retry
+          const retryResult = await this.mint(retryDto);
+
+          if (retryResult && retryResult.status === 'active') {
+            console.log(
+              `✅ Immediate retry successful for position ${positionId}`,
+            );
+            return {
+              success: true,
+              positionId,
+              retrySuccessful: true,
+              newPositionId: retryResult.positionId,
+              totalUSDValue: totalUSDValue,
+              token0Amount: actualToken0AmountBigInt.toString(),
+              token1Amount: actualToken1AmountBigInt.toString(),
+              token0USDValue: token0USDValue,
+              token1USDValue: token1USDValue,
+            };
+          } else {
+            console.log(`❌ Immediate retry failed for position ${positionId}`);
+            throw new Error('Retry mint failed');
+          }
+        } catch (retryError) {
+          console.error(
+            `Immediate retry failed for position ${positionId}:`,
+            retryError,
+          );
+          // Return cleanup result even if retry failed
+          return {
+            success: true,
+            positionId,
+            retrySuccessful: false,
+            retryError: retryError.message,
+            totalUSDValue: totalUSDValue,
+            token0Amount: actualToken0AmountBigInt.toString(),
+            token1Amount: actualToken1AmountBigInt.toString(),
+            token0USDValue: token0USDValue,
+            token1USDValue: token1USDValue,
+          };
+        }
+      }
+
       return {
         success: true,
         positionId,
@@ -4297,7 +4384,7 @@ export class AerodromeService {
 
   /**
    * Retry failed mints - this is a simplified version for manual testing
-   * The full logic is in AerodromeRetryFailedMintsCronService
+   * Note: Immediate retries are now handled in the main mint function
    */
   async retryFailedMints(): Promise<{
     success: boolean;
@@ -4313,11 +4400,11 @@ export class AerodromeService {
     try {
       console.log('=== MANUAL RETRY FAILED MINTS ===');
 
-      // Find all positions with ready_for_retry status created in the past 5 minutes (matches cron frequency)
+      // Find all positions with mint_failed status created in the past 5 minutes (for manual testing)
       const fiveMinutesAgo = new Date(Date.now() - 5 * 60 * 1000);
 
       const failedPositions = await this.aerodromePositionModel.find({
-        status: 'ready_for_retry',
+        status: 'mint_failed',
         createdAt: { $gte: fiveMinutesAgo },
       });
 
@@ -4382,119 +4469,58 @@ export class AerodromeService {
             'percentDeviation' in mintParams,
           );
 
-          // Check if this position needs cleanup before retry
-          const needsCleanup = ['failed', 'cleanup_failed'].includes(
-            position.status,
+          // For manual retry, we'll use the cleanup function with retry enabled
+          console.log(
+            `Processing manual retry for position ${position.positionId}`,
           );
 
-          if (needsCleanup) {
+          try {
+            // Get the intended token amounts from the original position metadata
+            const intendedToken0Amount =
+              position.metadata?.tokenAmounts?.rawToken0Amount || '0';
+            const intendedToken1Amount =
+              position.metadata?.tokenAmounts?.rawToken1Amount || '0';
+
             console.log(
-              `Position ${position.positionId} needs cleanup before retry (status: ${position.status})`,
-            );
-
-            try {
-              // Get the intended token amounts from the original position metadata
-              const intendedToken0Amount =
-                position.metadata?.tokenAmounts?.rawToken0Amount || '0';
-              const intendedToken1Amount =
-                position.metadata?.tokenAmounts?.rawToken1Amount || '0';
-
-              console.log(
-                `Cleaning up position ${position.positionId} with actual amounts:`,
-                {
-                  token0: intendedToken0Amount,
-                  token1: intendedToken1Amount,
-                },
-              );
-
-              // Clean up the failed position first
-              await this.cleanupFailedMint(
-                position.positionId,
-                intendedToken0Amount,
-                intendedToken1Amount,
-              );
-
-              console.log(
-                `✅ Cleanup completed for position ${position.positionId}`,
-              );
-            } catch (cleanupError) {
-              console.error(
-                `❌ Cleanup failed for position ${position.positionId}:`,
-                cleanupError,
-              );
-              results.failed++;
-              continue; // Skip this position if cleanup fails
-            }
-          }
-
-          // Attempt to mint the position again
-          // Create a proper DTO instance to ensure validation works correctly
-          const mintDto = new CreateAerodromeLpDto();
-          Object.assign(mintDto, mintParams);
-
-          console.log('Created DTO instance:', {
-            dtoKeys: Object.keys(mintDto),
-            hasPercentDeviation: 'percentDeviation' in mintDto,
-            percentDeviation: mintDto.percentDeviation,
-          });
-
-          const mintResult = await this.mint(mintDto);
-
-          if (mintResult && mintResult.status === 'active') {
-            results.successful++;
-            console.log(
-              `✅ Successfully retried mint for position ${position.positionId}`,
-            );
-
-            // If this was a rebalanced position, update the original position status
-            if (position.metadata?.rebalancedPositionId) {
-              const originalPositionId = position.metadata.rebalancedPositionId;
-              console.log(
-                `Updating original position ${originalPositionId} status to rebalanced`,
-              );
-
-              await this.aerodromePositionModel.findOneAndUpdate(
-                { positionId: originalPositionId },
-                {
-                  status: 'rebalanced',
-                  $set: {
-                    'metadata.retrySuccess': {
-                      timestamp: new Date().toISOString(),
-                      newPositionId: mintResult.positionId,
-                      retryPositionId: position.positionId,
-                    },
-                  },
-                },
-              );
-            }
-
-            // Update the retry position status
-            await this.aerodromePositionModel.findOneAndUpdate(
-              { positionId: position.positionId },
+              `Cleaning up and retrying position ${position.positionId} with actual amounts:`,
               {
-                status: 'retry_successful',
-                $set: {
-                  'metadata.retryResult': {
-                    timestamp: new Date().toISOString(),
-                    newPositionId: mintResult.positionId,
-                    success: true,
-                    cleanupPerformed: needsCleanup,
-                  },
-                },
+                token0: intendedToken0Amount,
+                token1: intendedToken1Amount,
               },
             );
-          } else {
-            results.failed++;
-            console.log(
-              `❌ Failed to retry mint for position ${position.positionId}`,
+
+            // Clean up and retry the failed position
+            const cleanupResult = await this.cleanupFailedMint(
+              position.positionId,
+              intendedToken0Amount,
+              intendedToken1Amount,
+              true, // Enable retry
             );
+
+            if (cleanupResult.retrySuccessful) {
+              results.successful++;
+              console.log(
+                `✅ Manual retry successful for position ${position.positionId}`,
+              );
+            } else {
+              results.failed++;
+              console.log(
+                `❌ Manual retry failed for position ${position.positionId}: ${cleanupResult.retryError}`,
+              );
+            }
+          } catch (cleanupError) {
+            console.error(
+              `❌ Cleanup/retry failed for position ${position.positionId}:`,
+              cleanupError,
+            );
+            results.failed++;
           }
         } catch (error) {
-          results.failed++;
           console.error(
             `❌ Error processing failed position ${position.positionId}:`,
             error,
           );
+          results.failed++;
         }
       }
 

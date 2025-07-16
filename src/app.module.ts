@@ -10,7 +10,7 @@ import { ApiKey, ApiKeySchema } from './schemas/api-key.schema';
 // import { TwitterModule } from './twitter/twitter.module';
 // import { MentionCronService } from './mention-cron.service';
 import { AerodromeRebalancingCronService } from './aerodrome-rebalancing-cron.service';
-import { AerodromeRetryFailedMintsCronService } from './aerodrome-retry-failed-mints-cron.service';
+
 import { AerodromePositionTrackingCronService } from './aerodrome-position-tracking-cron.service';
 import { User, UserSchema } from './schemas/user.schema';
 import { PendingTip, PendingTipSchema } from './schemas/pending-tip.schema';
@@ -46,7 +46,7 @@ import {
     CrossmintJwtGuard,
     // MentionCronService,
     AerodromeRebalancingCronService,
-    AerodromeRetryFailedMintsCronService,
+
     AerodromePositionTrackingCronService,
   ],
 })

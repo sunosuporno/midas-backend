@@ -117,7 +117,7 @@ export class AerodromeController {
   @Post('retry-failed-mints')
   async retryFailedMints() {
     // This will trigger the retry logic manually for testing
-    // Note: This is a simplified version for testing - in production, the cron service handles this
+    // Note: Immediate retries are now handled in the main mint function
     return this.aerodromeService.retryFailedMints();
   }
 

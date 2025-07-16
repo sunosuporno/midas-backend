@@ -24,7 +24,7 @@ export class AerodromePosition {
     | 'failed'
     | 'rebalancing'
     | 'mint_failed'
-    | 'cleaned_up'
+    | 'cleanup_completed'
     | 'cleanup_failed'
     | 'retry_successful'
     | 'retry_failed';
