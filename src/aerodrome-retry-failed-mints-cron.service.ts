@@ -8,6 +8,7 @@ import {
   AerodromePosition,
   AerodromePositionDocument,
 } from './aerodrome/schemas/aerodrome-position.schema';
+import { getPoolConfig } from './aerodrome/config/pools.config';
 
 @Injectable()
 export class AerodromeRetryFailedMintsCronService implements OnModuleInit {
@@ -56,11 +57,11 @@ export class AerodromeRetryFailedMintsCronService implements OnModuleInit {
       console.log('=== STARTING RETRY FAILED MINTS ===');
       const startTime = Date.now();
 
-      // Find all positions with cleaned_up status created in the past 5 minutes (matches cron frequency)
+      // Find all positions with ready_for_retry status created in the past 5 minutes (matches cron frequency)
       const fiveMinutesAgo = new Date(Date.now() - 5 * 60 * 1000);
 
       const failedPositions = await this.aerodromePositionModel.find({
-        status: 'cleaned_up',
+        status: 'ready_for_retry',
         createdAt: { $gte: fiveMinutesAgo },
       });
 
@@ -80,17 +81,92 @@ export class AerodromeRetryFailedMintsCronService implements OnModuleInit {
           results.processed++;
 
           // Prepare mint parameters from the original position data
+          const originalPercentDeviation =
+            position.metadata?.tickRange?.percentDeviation !== undefined
+              ? position.metadata?.tickRange?.percentDeviation
+              : 1.5;
+
+          // Calculate current USD value based on stored token amounts and current prices
+          let retryUSDValue = position.usdcAmount; // fallback
+
+          if (position.metadata?.retryMetadata?.originalTokenAmounts) {
+            const storedAmounts =
+              position.metadata.retryMetadata.originalTokenAmounts;
+            const poolConfig = getPoolConfig(position.pool);
+
+            if (poolConfig) {
+              // Get current token prices
+              let token0Price = 1; // USDC is always $1
+              let token1Price = 1; // USDC is always $1
+
+              if (
+                poolConfig.token0 !==
+                '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913'
+              ) {
+                // USDC address
+                try {
+                  token0Price = await this.aerodromeService.getTokenPrice(
+                    poolConfig.token0Name,
+                  );
+                } catch (error) {
+                  console.error(
+                    `Failed to get ${poolConfig.token0Name} price:`,
+                    error,
+                  );
+                }
+              }
+
+              if (
+                poolConfig.token1 !==
+                '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913'
+              ) {
+                // USDC address
+                try {
+                  token1Price = await this.aerodromeService.getTokenPrice(
+                    poolConfig.token1Name,
+                  );
+                } catch (error) {
+                  console.error(
+                    `Failed to get ${poolConfig.token1Name} price:`,
+                    error,
+                  );
+                }
+              }
+
+              // Calculate current USD value
+              const token0Amount =
+                Number(storedAmounts.token0) /
+                Math.pow(10, poolConfig.token0Decimals);
+              const token1Amount =
+                Number(storedAmounts.token1) /
+                Math.pow(10, poolConfig.token1Decimals);
+
+              retryUSDValue =
+                token0Amount * token0Price + token1Amount * token1Price;
+
+              console.log('Calculated current USD value for retry:', {
+                token0Amount,
+                token0Price,
+                token1Amount,
+                token1Price,
+                totalUSDValue: retryUSDValue,
+                originalStoredValue: storedAmounts.totalUSDValue,
+              });
+            }
+          }
+
           const mintParams = {
             walletLocator: position.walletLocator,
             pool: position.pool,
-            usdcAmount: position.usdcAmount,
+            usdcAmount: retryUSDValue,
             description:
               position.metadata?.description ||
               `Retry of failed position ${position.positionId}`,
             rebalancedPositionId:
               position.metadata?.rebalancedPositionId || null,
-            percentDeviation:
-              position.metadata?.tickRange?.percentDeviation || 0,
+            percentDeviation: originalPercentDeviation,
+            isRebalanceOrRetry: true, // Add flag for retry/rebalancing flow
+            positionId: position.positionId, // Pass the position ID to get stored token amounts
           };
 
           console.log('Retry mint params:', mintParams);

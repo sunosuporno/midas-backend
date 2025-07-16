@@ -11,10 +11,14 @@ import {
 import { AerodromeService } from './aerodrome.service';
 import { CreateAerodromeLpDto } from './dto/create-aerodrome-lp.dto';
 import { Public } from '../decorators/public.decorator';
+import { AerodromePositionTrackingCronService } from '../aerodrome-position-tracking-cron.service';
 
 @Controller('aerodrome')
 export class AerodromeController {
-  constructor(private readonly aerodromeService: AerodromeService) {}
+  constructor(
+    private readonly aerodromeService: AerodromeService,
+    private readonly positionTrackingCronService: AerodromePositionTrackingCronService,
+  ) {}
 
   @Public()
   @Post('mint')
@@ -148,5 +152,17 @@ export class AerodromeController {
   ) {
     const { positionId, reason } = body;
     return this.aerodromeService.rebalancePosition(positionId, reason);
+  }
+
+  @Public()
+  @Get('position/:positionId/details')
+  async getPositionDetails(@Param('positionId') positionId: string) {
+    return this.aerodromeService.getPositionDetails(positionId);
+  }
+
+  @Public()
+  @Post('track-all-positions')
+  async trackAllPositions() {
+    return this.positionTrackingCronService.manualTrackAllPositions();
   }
 }

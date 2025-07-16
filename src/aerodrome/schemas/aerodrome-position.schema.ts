@@ -43,6 +43,30 @@ export class AerodromePosition {
     token0: string;
     token1: string;
   };
+
+  // New fields for retry/rebalancing system
+  @Prop({ type: Object })
+  retryMetadata?: {
+    originalTokenAmounts?: {
+      token0: string;
+      token1: string;
+      totalUSDValue: number;
+    };
+    currentTokenAmounts?: {
+      token0: string;
+      token1: string;
+      totalUSDValue: number;
+    };
+    retryAttempts?: number;
+    lastRetryAt?: Date;
+    rebalancingSwaps?: Array<{
+      fromToken: string;
+      toToken: string;
+      amount: string;
+      transactionHash: string;
+      timestamp: Date;
+    }>;
+  };
 }
 
 export const AerodromePositionSchema =

@@ -653,19 +653,86 @@ export class AerodromeService {
     let amount0Used = null;
     let amount1Used = null;
 
-    try {
-      console.log('=== Creating Aerodrome LP Position ===');
-      console.log('Wallet Locator:', createAerodromeLpDto.walletLocator);
-      console.log('USDC Amount:', createAerodromeLpDto.usdcAmount);
-      console.log('Pool:', createAerodromeLpDto.pool);
+    console.log('=== Creating Aerodrome LP Position ===');
+    console.log('Wallet Locator:', createAerodromeLpDto.walletLocator);
+    console.log('USDC Amount:', createAerodromeLpDto.usdcAmount);
+    console.log('Pool:', createAerodromeLpDto.pool);
 
-      // Get wallet address from wallet locator
-      const walletAddress = this.getWalletAddressFromLocator(
-        createAerodromeLpDto.walletLocator,
-      );
-      console.log('Extracted wallet address:', walletAddress);
+    // Get wallet address from wallet locator
+    const walletAddress = this.getWalletAddressFromLocator(
+      createAerodromeLpDto.walletLocator,
+    );
+    console.log('Extracted wallet address:', walletAddress);
 
-      //validate enough balance
+    // BALANCE CHECKS - OUTSIDE TRY-CATCH TO AVOID CLEANUP ISSUES
+    if (createAerodromeLpDto.isRebalanceOrRetry) {
+      console.log('=== RETRY/REBALANCING MODE ===');
+
+      // For retry/rebalancing: Check if we have enough of the tokens we actually have
+      const poolConfig = getPoolConfig(createAerodromeLpDto.pool);
+      if (!poolConfig) {
+        throw new HttpException(
+          `Pool configuration not found for: ${createAerodromeLpDto.pool}`,
+          400,
+        );
+      }
+
+      // Get current token balances
+      const [token0Balance, token1Balance] = await Promise.all([
+        this.readContract(
+          poolConfig.token0,
+          ERC20_ABI as unknown as any[],
+          'balanceOf',
+          [walletAddress],
+        ),
+        this.readContract(
+          poolConfig.token1,
+          ERC20_ABI as unknown as any[],
+          'balanceOf',
+          [walletAddress],
+        ),
+      ]);
+
+      const token0BalanceBigInt = BigInt(token0Balance);
+      const token1BalanceBigInt = BigInt(token1Balance);
+
+      console.log('Current token balances for retry:', {
+        token0: poolConfig.token0Name,
+        token1: poolConfig.token1Name,
+        token0Balance: token0BalanceBigInt.toString(),
+        token1Balance: token1BalanceBigInt.toString(),
+      });
+
+      // Check if we have enough of the actual amounts we need
+      const originalPosition = await this.aerodromePositionModel.findOne({
+        positionId: createAerodromeLpDto.positionId,
+      });
+
+      if (originalPosition?.metadata?.retryMetadata?.originalTokenAmounts) {
+        const storedAmounts =
+          originalPosition.metadata.retryMetadata.originalTokenAmounts;
+        const requiredToken0Amount = BigInt(storedAmounts.token0);
+        const requiredToken1Amount = BigInt(storedAmounts.token1);
+
+        if (token0BalanceBigInt < requiredToken0Amount) {
+          throw new HttpException(
+            `Insufficient ${poolConfig.token0Name} balance for retry. Required: ${requiredToken0Amount}, Available: ${token0BalanceBigInt}`,
+            400,
+          );
+        }
+
+        if (token1BalanceBigInt < requiredToken1Amount) {
+          throw new HttpException(
+            `Insufficient ${poolConfig.token1Name} balance for retry. Required: ${requiredToken1Amount}, Available: ${token1BalanceBigInt}`,
+            400,
+          );
+        }
+      }
+
+      console.log('✅ Sufficient token balances for retry/rebalancing');
+    } else {
+      // Original USDC-only balance check for normal mints
+      console.log('=== NORMAL MINT MODE ===');
 
       const balance = await this.readContract(
         this.USDC_ADDRESS,
@@ -675,9 +742,11 @@ export class AerodromeService {
       );
       const balanceBigInt = BigInt(balance);
       if (balanceBigInt < createAerodromeLpDto.usdcAmount) {
-        throw new HttpException('Insufficient balance', 400);
+        throw new HttpException('Insufficient USDC balance', 400);
       }
+    }
 
+    try {
       // Validate pool exists in our configuration
       if (!isValidPool(createAerodromeLpDto.pool)) {
         throw new HttpException(
@@ -786,62 +855,111 @@ export class AerodromeService {
 
       await position.save();
 
-      // Convert USDC amount to base units (6 decimals)
-      const usdcAmountInBaseUnits = BigInt(
-        Math.floor(createAerodromeLpDto.usdcAmount * 10 ** 6),
-      ).toString();
-
-      console.log('USDC amount in base units:', usdcAmountInBaseUnits);
-
-      // Use fixed slippage of 1% (100 bps)
-      const slippageBps = 100;
-      console.log('Using slippage (bps):', slippageBps);
-
-      // Step 1: Check if token0 needs USDC swap
-      let token0SwapResult = null;
-      if (poolConfig.token0 !== this.USDC_ADDRESS) {
-        // Calculate the required USDC sell amount for token0
-        const token0Price = await this.getTokenPrice(poolConfig.token0Name);
-        const token0AmountHuman =
-          Number(liquidityAmounts.usedAmounts.token0.rawAmount) /
-          Math.pow(10, poolConfig.token0Decimals);
-        const sellAmountUSDC = Math.ceil(
-          token0AmountHuman * token0Price * Math.pow(10, this.USDC_DECIMALS),
+      // Handle different minting logic based on mode
+      if (createAerodromeLpDto.isRebalanceOrRetry) {
+        console.log('=== RETRY/REBALANCING MODE: Using stored tokens ===');
+        // Call the retry minting function
+        const retryResult = await this.handleRetryMinting(
+          createAerodromeLpDto,
+          poolConfig,
+          liquidityAmounts,
         );
-        // Use the new swapTokens helper
-        const { txResult } = await this.swapTokens(
-          createAerodromeLpDto.walletLocator,
-          this.USDC_ADDRESS,
-          poolConfig.token0,
-          sellAmountUSDC.toString(),
-          slippageBps,
-        );
-        token0SwapResult = txResult;
+
+        // Extract results from retry function
+        amount0Used = retryResult.amount0Used;
+        amount1Used = retryResult.amount1Used;
+        swapResults = retryResult.swapResults;
       } else {
-        console.log('Token0 is USDC, no swap needed');
+        console.log('=== NORMAL MINT MODE: Performing token swaps ===');
+
+        // Convert USDC amount to base units (6 decimals)
+        const usdcAmountInBaseUnits = BigInt(
+          Math.floor(createAerodromeLpDto.usdcAmount * 10 ** 6),
+        ).toString();
+
+        console.log('USDC amount in base units:', usdcAmountInBaseUnits);
+
+        // Use fixed slippage of 1% (100 bps)
+        const slippageBps = 100;
+        console.log('Using slippage (bps):', slippageBps);
+
+        // Step 1: Check if token0 needs USDC swap
+        let token0SwapResult = null;
+        if (poolConfig.token0 !== this.USDC_ADDRESS) {
+          // Calculate the required USDC sell amount for token0
+          const token0Price = await this.getTokenPrice(poolConfig.token0Name);
+          const token0AmountHuman =
+            Number(liquidityAmounts.usedAmounts.token0.rawAmount) /
+            Math.pow(10, poolConfig.token0Decimals);
+          const sellAmountUSDC = Math.ceil(
+            token0AmountHuman * token0Price * Math.pow(10, this.USDC_DECIMALS),
+          );
+          // Use the new swapTokens helper
+          const { txResult } = await this.swapTokens(
+            createAerodromeLpDto.walletLocator,
+            this.USDC_ADDRESS,
+            poolConfig.token0,
+            sellAmountUSDC.toString(),
+            slippageBps,
+          );
+          token0SwapResult = txResult;
+        } else {
+          console.log('Token0 is USDC, no swap needed');
+        }
+
+        // Step 4: Check if token1 needs USDC swap
+        let token1SwapResult = null;
+        if (poolConfig.token1 !== this.USDC_ADDRESS) {
+          const token1Price = await this.getTokenPrice(poolConfig.token1Name);
+          const token1AmountHuman =
+            Number(liquidityAmounts.usedAmounts.token1.rawAmount) /
+            Math.pow(10, poolConfig.token1Decimals);
+          const sellAmountUSDC = Math.ceil(
+            token1AmountHuman * token1Price * Math.pow(10, this.USDC_DECIMALS),
+          );
+          const { txResult } = await this.swapTokens(
+            createAerodromeLpDto.walletLocator,
+            this.USDC_ADDRESS,
+            poolConfig.token1,
+            sellAmountUSDC.toString(),
+            slippageBps,
+          );
+          token1SwapResult = txResult;
+        } else {
+          console.log('Token1 is USDC, no swap needed');
+        }
+
+        // Store swap results for normal mode
+        swapResults = {
+          token0Swap: token0SwapResult
+            ? {
+                transactionHash: token0SwapResult.transactionHash,
+                status: token0SwapResult.status,
+              }
+            : null,
+          token1Swap: token1SwapResult
+            ? {
+                transactionHash: token1SwapResult.transactionHash,
+                status: token1SwapResult.status,
+              }
+            : null,
+        };
+
+        // Set amounts used for normal mode
+        amount0Used = BigInt(liquidityAmounts.usedAmounts.token0.rawAmount);
+        amount1Used = BigInt(liquidityAmounts.usedAmounts.token1.rawAmount);
       }
 
-      // Step 4: Check if token1 needs USDC swap
-      let token1SwapResult = null;
-      if (poolConfig.token1 !== this.USDC_ADDRESS) {
-        const token1Price = await this.getTokenPrice(poolConfig.token1Name);
-        const token1AmountHuman =
-          Number(liquidityAmounts.usedAmounts.token1.rawAmount) /
-          Math.pow(10, poolConfig.token1Decimals);
-        const sellAmountUSDC = Math.ceil(
-          token1AmountHuman * token1Price * Math.pow(10, this.USDC_DECIMALS),
-        );
-        const { txResult } = await this.swapTokens(
-          createAerodromeLpDto.walletLocator,
-          this.USDC_ADDRESS,
-          poolConfig.token1,
-          sellAmountUSDC.toString(),
-          slippageBps,
-        );
-        token1SwapResult = txResult;
-      } else {
-        console.log('Token1 is USDC, no swap needed');
-      }
+      // Update position with swap results before minting
+      await this.aerodromePositionModel.findOneAndUpdate(
+        { positionId },
+        {
+          metadata: {
+            ...position.metadata,
+            ...swapResults,
+          },
+        },
+      );
 
       // Step 5.5: Approve tokens for NonFungiblePositionManager before minting
       // Check and approve token0
@@ -913,21 +1031,7 @@ export class AerodromeService {
         approveAmount1,
       );
 
-      // Store swap results in memory for error handling
-      swapResults = {
-        token0Swap: token0SwapResult
-          ? {
-              transactionHash: token0SwapResult.transactionHash,
-              status: token0SwapResult.status,
-            }
-          : null,
-        token1Swap: token1SwapResult
-          ? {
-              transactionHash: token1SwapResult.transactionHash,
-              status: token1SwapResult.status,
-            }
-          : null,
-      };
+      // Note: swapResults is already set in the if-else block above
 
       // Update position with swap results before minting
       await this.aerodromePositionModel.findOneAndUpdate(
@@ -1169,18 +1273,8 @@ export class AerodromeService {
           lpTokens: liquidity || undefined,
           metadata: {
             ...position.metadata,
-            token0Swap: token0SwapResult
-              ? {
-                  transactionHash: token0SwapResult.transactionHash,
-                  status: token0SwapResult.status,
-                }
-              : null,
-            token1Swap: token1SwapResult
-              ? {
-                  transactionHash: token1SwapResult.transactionHash,
-                  status: token1SwapResult.status,
-                }
-              : null,
+            token0Swap: swapResults?.token0Swap || null,
+            token1Swap: swapResults?.token1Swap || null,
             mint: mintResult,
             mintDetails: {
               token0PriceAtMint,
@@ -1228,20 +1322,7 @@ export class AerodromeService {
             rawToken1Amount: tokenAmounts.rawToken1Amount,
           },
           liquidityAmounts: liquidityAmounts,
-          swaps: {
-            token0: token0SwapResult
-              ? {
-                  transactionHash: token0SwapResult.transactionHash,
-                  status: token0SwapResult.status,
-                }
-              : null,
-            token1: token1SwapResult
-              ? {
-                  transactionHash: token1SwapResult.transactionHash,
-                  status: token1SwapResult.status,
-                }
-              : null,
-          },
+          swaps: swapResults,
           mint: mintResult,
           mintDetails: {
             token0PriceAtMint,
@@ -1562,7 +1643,193 @@ export class AerodromeService {
     }
   }
 
-  private async getTokenPrice(tokenName: string): Promise<number> {
+  private async handleRetryMinting(
+    createAerodromeLpDto: CreateAerodromeLpDto,
+    poolConfig: PoolConfig,
+    liquidityAmounts: LiquidityAmounts,
+  ): Promise<{
+    amount0Used: bigint;
+    amount1Used: bigint;
+    swapResults: any;
+  }> {
+    console.log('=== HANDLING RETRY MINTING ===');
+
+    // Get the stored token amounts from the original position
+    const originalPosition = await this.aerodromePositionModel.findOne({
+      positionId: createAerodromeLpDto.positionId,
+    });
+
+    if (!originalPosition?.metadata?.retryMetadata?.originalTokenAmounts) {
+      throw new Error('No retry metadata found for position');
+    }
+
+    const storedAmounts =
+      originalPosition.metadata.retryMetadata.originalTokenAmounts;
+
+    console.log('Using stored token amounts for retry:', {
+      token0: storedAmounts.token0,
+      token1: storedAmounts.token1,
+    });
+
+    // $A and $B are the stored amounts we have
+    const A = BigInt(storedAmounts.token0);
+    const B = BigInt(storedAmounts.token1);
+
+    // $a and $b are the calculated optimal amounts
+    const a = BigInt(liquidityAmounts.usedAmounts.token0.rawAmount);
+    const b = BigInt(liquidityAmounts.usedAmounts.token1.rawAmount);
+
+    console.log('Token amounts comparison:', {
+      storedToken0: A.toString(),
+      storedToken1: B.toString(),
+      calculatedToken0: a.toString(),
+      calculatedToken1: b.toString(),
+    });
+
+    // Get current token prices
+    let token0Price = 1; // USDC is always $1
+    let token1Price = 1; // USDC is always $1
+
+    if (poolConfig.token0 !== this.USDC_ADDRESS) {
+      token0Price = await this.getTokenPrice(poolConfig.token0Name);
+    }
+    if (poolConfig.token1 !== this.USDC_ADDRESS) {
+      token1Price = await this.getTokenPrice(poolConfig.token1Name);
+    }
+
+    console.log('Current token prices:', {
+      token0Price,
+      token1Price,
+    });
+
+    // Calculate USD values
+    const A_USD =
+      (Number(A) / Math.pow(10, poolConfig.token0Decimals)) * token0Price;
+    const B_USD =
+      (Number(B) / Math.pow(10, poolConfig.token1Decimals)) * token1Price;
+    const a_USD =
+      (Number(a) / Math.pow(10, poolConfig.token0Decimals)) * token0Price;
+    const b_USD =
+      (Number(b) / Math.pow(10, poolConfig.token1Decimals)) * token1Price;
+
+    console.log('USD values:', {
+      A_USD: A_USD.toFixed(2),
+      B_USD: B_USD.toFixed(2),
+      a_USD: a_USD.toFixed(2),
+      b_USD: b_USD.toFixed(2),
+    });
+
+    // Check if USD values match (they should be equal)
+    const totalStoredUSD = A_USD + B_USD;
+    const totalCalculatedUSD = a_USD + b_USD;
+
+    console.log('Total USD comparison:', {
+      totalStoredUSD: totalStoredUSD.toFixed(2),
+      totalCalculatedUSD: totalCalculatedUSD.toFixed(2),
+      difference: Math.abs(totalStoredUSD - totalCalculatedUSD).toFixed(2),
+    });
+
+    // Calculate the difference: $A*price - $a*price = $b*price - $B*price
+    const token0Difference = A_USD - a_USD;
+    const token1Difference = b_USD - B_USD;
+
+    console.log('Token differences:', {
+      token0Difference: token0Difference.toFixed(2),
+      token1Difference: token1Difference.toFixed(2),
+    });
+
+    const swapResults = {
+      token0Swap: null,
+      token1Swap: null,
+    };
+
+    // Determine if we need to swap and in which direction
+    if (Math.abs(token0Difference) > 0.01) {
+      // Small threshold to avoid dust
+      if (token0Difference > 0) {
+        // We have more token0 than needed, swap token0 to token1
+        console.log('Need to swap token0 to token1');
+
+        // Calculate sell amount: (token0Difference/token0Price) * 10^token0Decimals
+        const sellAmountToken0 = Math.floor(
+          (token0Difference / token0Price) *
+            Math.pow(10, poolConfig.token0Decimals),
+        );
+
+        console.log('Swap details:', {
+          sellToken: poolConfig.token0Name,
+          buyToken: poolConfig.token1Name,
+          sellAmount: sellAmountToken0.toString(),
+          token0Difference: token0Difference.toFixed(2),
+          token0Price,
+        });
+
+        // Perform the swap: token0 to token1
+        const { txResult } = await this.swapTokens(
+          createAerodromeLpDto.walletLocator,
+          poolConfig.token0,
+          poolConfig.token1,
+          sellAmountToken0.toString(),
+          100, // 1% slippage
+        );
+
+        swapResults.token0Swap = {
+          transactionHash: txResult.transactionHash,
+          status: txResult.status,
+        };
+      } else {
+        // We have less token0 than needed, swap token1 to token0
+        console.log('Need to swap token1 to token0');
+
+        // Calculate sell amount: (token1Difference/token1Price) * 10^token1Decimals
+        const sellAmountToken1 = Math.floor(
+          (Math.abs(token0Difference) / token1Price) *
+            Math.pow(10, poolConfig.token1Decimals),
+        );
+
+        console.log('Swap details:', {
+          sellToken: poolConfig.token1Name,
+          buyToken: poolConfig.token0Name,
+          sellAmount: sellAmountToken1.toString(),
+          token1Difference: Math.abs(token0Difference).toFixed(2),
+          token1Price,
+        });
+
+        // Perform the swap: token1 to token0
+        const { txResult } = await this.swapTokens(
+          createAerodromeLpDto.walletLocator,
+          poolConfig.token1,
+          poolConfig.token0,
+          sellAmountToken1.toString(),
+          100, // 1% slippage
+        );
+
+        swapResults.token1Swap = {
+          transactionHash: txResult.transactionHash,
+          status: txResult.status,
+        };
+      }
+    } else {
+      console.log('No rebalancing needed, amounts are close enough');
+    }
+
+    // For now, use the calculated amounts (a and b) as the target amounts
+    const amount0Used = a;
+    const amount1Used = b;
+
+    console.log('Final amounts to use:', {
+      amount0Used: amount0Used.toString(),
+      amount1Used: amount1Used.toString(),
+    });
+
+    return {
+      amount0Used,
+      amount1Used,
+      swapResults,
+    };
+  }
+
+  async getTokenPrice(tokenName: string): Promise<number> {
     try {
       console.log('Getting price for token:', tokenName);
 
@@ -2007,7 +2274,11 @@ export class AerodromeService {
     };
   }
 
-  async burn(walletLocator: string, tokenId: string) {
+  async burn(
+    walletLocator: string,
+    tokenId: string,
+    isRebalance: boolean = false,
+  ) {
     try {
       // 1. Get the position to find the full liquidity amount
       const position = await this.aerodromePositionModel.findOne({
@@ -2169,50 +2440,154 @@ export class AerodromeService {
         },
       );
 
-      // === Swap both tokens to USDC if needed, using only the actual received amount if less than totalTokensReceived ===
+      // === Handle token amounts based on whether this is a rebalance or normal burn ===
       const actualReceivedToken0 = token0BalanceAfter - token0BalanceBefore;
       const actualReceivedToken1 = token1BalanceAfter - token1BalanceBefore;
-      // Negation logic: if token0BalanceAfter <= receivedToken0, use actualReceivedToken0, else use receivedToken0
-      const swapAmountToken0 =
-        token0BalanceAfter <= totalAvailableToken0
-          ? actualReceivedToken0
-          : totalAvailableToken0;
-      const swapAmountToken1 =
-        token1BalanceAfter <= totalAvailableToken1
-          ? actualReceivedToken1
-          : totalAvailableToken1;
-      let usdcFromToken0 = 0;
-      let usdcFromToken1 = 0;
-      const slippageBps = 100;
-      if (poolConfig.token0 !== this.USDC_ADDRESS && swapAmountToken0 > 0n) {
-        const { buyAmount } = await this.swapTokens(
-          walletLocator,
-          poolConfig.token0,
-          this.USDC_ADDRESS,
-          swapAmountToken0.toString(),
-          slippageBps,
+
+      let withdrawAmountFinal = 0;
+      let tokenAmountsForRebalance = null;
+
+      if (isRebalance) {
+        // For rebalance: Store token amounts instead of swapping to USDC
+        console.log(
+          '=== REBALANCE MODE: Storing token amounts instead of swapping ===',
         );
-        usdcFromToken0 = Number(buyAmount) / Math.pow(10, this.USDC_DECIMALS);
+
+        // Calculate the amounts to use for rebalancing based on your logic:
+        // 1. If balance > totalAvailable, use totalAvailable
+        // 2. If balance <= totalAvailable, use actualReceived
+        // 3. If actualReceived > balance, use balance difference
+        const rebalanceToken0Amount =
+          token0BalanceAfter > totalAvailableToken0
+            ? totalAvailableToken0
+            : actualReceivedToken0 > token0BalanceAfter
+              ? token0BalanceAfter - token0BalanceBefore
+              : actualReceivedToken0;
+
+        const rebalanceToken1Amount =
+          token1BalanceAfter > totalAvailableToken1
+            ? totalAvailableToken1
+            : actualReceivedToken1 > token1BalanceAfter
+              ? token1BalanceAfter - token1BalanceBefore
+              : actualReceivedToken1;
+
+        console.log('Rebalance token amounts:', {
+          rebalanceToken0Amount: rebalanceToken0Amount.toString(),
+          rebalanceToken1Amount: rebalanceToken1Amount.toString(),
+          token0BalanceAfter: token0BalanceAfter.toString(),
+          token1BalanceAfter: token1BalanceAfter.toString(),
+          totalAvailableToken0: totalAvailableToken0.toString(),
+          totalAvailableToken1: totalAvailableToken1.toString(),
+          actualReceivedToken0: actualReceivedToken0.toString(),
+          actualReceivedToken1: actualReceivedToken1.toString(),
+        });
+
+        // Calculate USD values for the stored amounts (similar to cleanupFailedMint)
+        let token0USDValue = 0;
+        let token1USDValue = 0;
+
+        if (poolConfig.token0 === this.USDC_ADDRESS) {
+          token0USDValue =
+            Number(rebalanceToken0Amount) / Math.pow(10, this.USDC_DECIMALS);
+        } else {
+          try {
+            const token0Price = await this.getTokenPrice(poolConfig.token0Name);
+            token0USDValue =
+              (Number(rebalanceToken0Amount) /
+                Math.pow(10, poolConfig.token0Decimals)) *
+              token0Price;
+          } catch (error) {
+            console.error(
+              `Failed to get price for ${poolConfig.token0Name}:`,
+              error,
+            );
+            token0USDValue = 0;
+          }
+        }
+
+        if (poolConfig.token1 === this.USDC_ADDRESS) {
+          token1USDValue =
+            Number(rebalanceToken1Amount) / Math.pow(10, this.USDC_DECIMALS);
+        } else {
+          try {
+            const token1Price = await this.getTokenPrice(poolConfig.token1Name);
+            token1USDValue =
+              (Number(rebalanceToken1Amount) /
+                Math.pow(10, poolConfig.token1Decimals)) *
+              token1Price;
+          } catch (error) {
+            console.error(
+              `Failed to get price for ${poolConfig.token1Name}:`,
+              error,
+            );
+            token1USDValue = 0;
+          }
+        }
+
+        const totalUSDValue = token0USDValue + token1USDValue;
+        withdrawAmountFinal = totalUSDValue;
+
+        tokenAmountsForRebalance = {
+          token0: rebalanceToken0Amount.toString(),
+          token1: rebalanceToken1Amount.toString(),
+          totalUSDValue: totalUSDValue,
+        };
+
+        console.log('Rebalance analysis:', {
+          token0: poolConfig.token0Name,
+          token1: poolConfig.token1Name,
+          rebalanceToken0Amount: rebalanceToken0Amount.toString(),
+          rebalanceToken1Amount: rebalanceToken1Amount.toString(),
+          token0USDValue: token0USDValue.toFixed(2),
+          token1USDValue: token1USDValue.toFixed(2),
+          totalUSDValue: totalUSDValue.toFixed(2),
+        });
       } else {
-        usdcFromToken0 =
-          Number(swapAmountToken0) / Math.pow(10, poolConfig.token0Decimals);
+        // Normal burn: Swap tokens to USDC
+        console.log('=== NORMAL BURN MODE: Swapping tokens to USDC ===');
+
+        // Negation logic: if token0BalanceAfter <= receivedToken0, use actualReceivedToken0, else use receivedToken0
+        const swapAmountToken0 =
+          token0BalanceAfter <= totalAvailableToken0
+            ? actualReceivedToken0
+            : totalAvailableToken0;
+        const swapAmountToken1 =
+          token1BalanceAfter <= totalAvailableToken1
+            ? actualReceivedToken1
+            : totalAvailableToken1;
+        let usdcFromToken0 = 0;
+        let usdcFromToken1 = 0;
+        const slippageBps = 100;
+        if (poolConfig.token0 !== this.USDC_ADDRESS && swapAmountToken0 > 0n) {
+          const { buyAmount } = await this.swapTokens(
+            walletLocator,
+            poolConfig.token0,
+            this.USDC_ADDRESS,
+            swapAmountToken0.toString(),
+            slippageBps,
+          );
+          usdcFromToken0 = Number(buyAmount) / Math.pow(10, this.USDC_DECIMALS);
+        } else {
+          usdcFromToken0 =
+            Number(swapAmountToken0) / Math.pow(10, poolConfig.token0Decimals);
+        }
+        if (poolConfig.token1 !== this.USDC_ADDRESS && swapAmountToken1 > 0n) {
+          const { buyAmount } = await this.swapTokens(
+            walletLocator,
+            poolConfig.token1,
+            this.USDC_ADDRESS,
+            swapAmountToken1.toString(),
+            slippageBps,
+          );
+          usdcFromToken1 = Number(buyAmount) / Math.pow(10, this.USDC_DECIMALS);
+        } else {
+          usdcFromToken1 =
+            Number(swapAmountToken1) / Math.pow(10, poolConfig.token1Decimals);
+        }
+        console.log('USDC from token0:', usdcFromToken0);
+        console.log('USDC from token1:', usdcFromToken1);
+        withdrawAmountFinal = usdcFromToken0 + usdcFromToken1;
       }
-      if (poolConfig.token1 !== this.USDC_ADDRESS && swapAmountToken1 > 0n) {
-        const { buyAmount } = await this.swapTokens(
-          walletLocator,
-          poolConfig.token1,
-          this.USDC_ADDRESS,
-          swapAmountToken1.toString(),
-          slippageBps,
-        );
-        usdcFromToken1 = Number(buyAmount) / Math.pow(10, this.USDC_DECIMALS);
-      } else {
-        usdcFromToken1 =
-          Number(swapAmountToken1) / Math.pow(10, poolConfig.token1Decimals);
-      }
-      console.log('USDC from token0:', usdcFromToken0);
-      console.log('USDC from token1:', usdcFromToken1);
-      const withdrawAmountFinal = usdcFromToken0 + usdcFromToken1;
 
       // 8. Update DB: mark position as closed/burned and store withdrawAmountFinal
       await this.aerodromePositionModel.findOneAndUpdate(
@@ -2233,7 +2608,7 @@ export class AerodromeService {
       );
 
       // 9. Return result
-      return {
+      const result: any = {
         message: 'Position fully closed and burned successfully',
         tokenId,
         decreaseLiquidityTx: decreaseResult?.transactionHash,
@@ -2260,6 +2635,13 @@ export class AerodromeService {
         },
         collectFeesResult,
       };
+
+      // Add token amounts for rebalance if this was a rebalance operation
+      if (isRebalance && tokenAmountsForRebalance) {
+        result.tokenAmountsForRebalance = tokenAmountsForRebalance;
+      }
+
+      return result;
     } catch (error) {
       console.error('Error burning position:', error);
       throw new HttpException(
@@ -2607,18 +2989,23 @@ export class AerodromeService {
       // Step 1: Burn the old position (this will also collect fees)
       console.log('Step 1: Burning old position...');
       const tokenId = position.metadata?.mintDetails?.tokenId;
-      const burnResult = await this.burn(position.walletLocator, tokenId);
+      const burnResult = await this.burn(position.walletLocator, tokenId, true); // Pass isRebalance=true
       console.log('Burn result:', burnResult);
 
-      // Step 2: Use the actual USDC received after all swaps
+      // Step 2: Use the token amounts from burn result for rebalancing
       const originalUsdcAmount = position.usdcAmount;
       const totalTokensReceived = burnResult.totalTokensReceived;
-      const newUsdcAmount = burnResult.withdrawAmountFinal;
 
-      console.log('USDC calculation:', {
+      // For rebalance, use the stored token amounts instead of USDC amount
+      const newUsdcAmount =
+        burnResult.tokenAmountsForRebalance?.totalUSDValue ||
+        burnResult.withdrawAmountFinal;
+
+      console.log('Rebalance calculation:', {
         original: originalUsdcAmount,
         totalTokensReceived,
         newTotal: newUsdcAmount,
+        tokenAmountsForRebalance: burnResult.tokenAmountsForRebalance,
       });
 
       // Step 3: Mint new position with updated amount
@@ -2635,6 +3022,33 @@ export class AerodromeService {
         position.metadata?.tickRange?.percentDeviation,
       );
 
+      // Store the token amounts from burn result in the original position for rebalancing
+      if (burnResult.tokenAmountsForRebalance) {
+        console.log(
+          'Storing token amounts for rebalancing:',
+          burnResult.tokenAmountsForRebalance,
+        );
+
+        await this.aerodromePositionModel.findOneAndUpdate(
+          { positionId },
+          {
+            $set: {
+              'metadata.retryMetadata': {
+                originalTokenAmounts: {
+                  token0: burnResult.tokenAmountsForRebalance.token0,
+                  token1: burnResult.tokenAmountsForRebalance.token1,
+                  totalUSDValue:
+                    burnResult.tokenAmountsForRebalance.totalUSDValue,
+                },
+                retryAttempts: 0,
+                lastRetryAt: new Date(),
+                rebalanceCompletedAt: new Date().toISOString(),
+              },
+            },
+          },
+        );
+      }
+
       const newPositionDto = {
         walletLocator: position.walletLocator,
         pool: position.pool,
@@ -2642,6 +3056,8 @@ export class AerodromeService {
         description: `Rebalanced position (${reason}) - Original: ${originalUsdcAmount} USDC, New total: ${newUsdcAmount} USDC`,
         rebalancedPositionId: positionId, // Pass the original position ID being rebalanced
         percentDeviation: originalPercentDeviation, // Pass the original percentDeviation
+        isRebalanceOrRetry: true, // Add flag for rebalancing flow
+        positionId: positionId, // Pass the position ID to get stored token amounts
       };
 
       console.log('Rebalance newPositionDto with percentDeviation:', {
@@ -3693,110 +4109,87 @@ export class AerodromeService {
       const actualToken0AmountBigInt = BigInt(actualToken0Amount);
       const actualToken1AmountBigInt = BigInt(actualToken1Amount);
 
-      // Check if any swaps were actually performed during minting
-      const hasToken0Swap =
-        position.metadata?.token0Swap !== null &&
-        position.metadata?.token0Swap !== undefined;
-      const hasToken1Swap =
-        position.metadata?.token1Swap !== null &&
-        position.metadata?.token1Swap !== undefined;
+      // Calculate USD values of the tokens
+      let token0USDValue = 0;
+      let token1USDValue = 0;
+
+      if (poolConfig.token0 === this.USDC_ADDRESS) {
+        // Token0 is USDC, calculate USD value directly
+        token0USDValue =
+          Number(actualToken0AmountBigInt) / Math.pow(10, this.USDC_DECIMALS);
+      } else {
+        // Get token0 price and calculate USD value
+        try {
+          const token0Price = await this.getTokenPrice(poolConfig.token0Name);
+          token0USDValue =
+            (Number(actualToken0AmountBigInt) /
+              Math.pow(10, poolConfig.token0Decimals)) *
+            token0Price;
+        } catch (error) {
+          console.error(
+            `Failed to get price for ${poolConfig.token0Name}:`,
+            error,
+          );
+          // Use a fallback price or estimate
+          token0USDValue = 0;
+        }
+      }
+
+      if (poolConfig.token1 === this.USDC_ADDRESS) {
+        // Token1 is USDC, calculate USD value directly
+        token1USDValue =
+          Number(actualToken1AmountBigInt) / Math.pow(10, this.USDC_DECIMALS);
+      } else {
+        // Get token1 price and calculate USD value
+        try {
+          const token1Price = await this.getTokenPrice(poolConfig.token1Name);
+          token1USDValue =
+            (Number(actualToken1AmountBigInt) /
+              Math.pow(10, poolConfig.token1Decimals)) *
+            token1Price;
+        } catch (error) {
+          console.error(
+            `Failed to get price for ${poolConfig.token1Name}:`,
+            error,
+          );
+          // Use a fallback price or estimate
+          token1USDValue = 0;
+        }
+      }
+
+      const totalUSDValue = token0USDValue + token1USDValue;
 
       console.log('Cleanup analysis:', {
         token0: poolConfig.token0Name,
         token1: poolConfig.token1Name,
         actualToken0Amount: actualToken0AmountBigInt.toString(),
         actualToken1Amount: actualToken1AmountBigInt.toString(),
-        hasToken0Swap,
-        hasToken1Swap,
+        token0USDValue: token0USDValue.toFixed(2),
+        token1USDValue: token1USDValue.toFixed(2),
+        totalUSDValue: totalUSDValue.toFixed(2),
       });
 
-      // Swap token0 to USDC if it's not USDC and has actual amount
-      let token0SwapResult = null;
-      if (
-        poolConfig.token0 !== this.USDC_ADDRESS &&
-        actualToken0AmountBigInt > 0n
-      ) {
-        console.log(`Swapping ${poolConfig.token0Name} to USDC...`);
-        try {
-          const { txResult } = await this.swapTokens(
-            position.walletLocator,
-            poolConfig.token0,
-            this.USDC_ADDRESS,
-            actualToken0AmountBigInt.toString(),
-            100, // 1% slippage for cleanup
-          );
-          token0SwapResult = txResult;
-          console.log(
-            `${poolConfig.token0Name} to USDC swap successful:`,
-            txResult.transactionHash,
-          );
-        } catch (error) {
-          console.error(
-            `Failed to swap ${poolConfig.token0Name} to USDC:`,
-            error,
-          );
-        }
-      } else if (poolConfig.token0 === this.USDC_ADDRESS) {
-        console.log('Token0 is USDC, no swap needed');
-      } else {
-        console.log('Token0 has no intended amount to swap');
-      }
-
-      // Swap token1 to USDC if it's not USDC and has actual amount
-      let token1SwapResult = null;
-      if (
-        poolConfig.token1 !== this.USDC_ADDRESS &&
-        actualToken1AmountBigInt > 0n
-      ) {
-        console.log(`Swapping ${poolConfig.token1Name} to USDC...`);
-        try {
-          const { txResult } = await this.swapTokens(
-            position.walletLocator,
-            poolConfig.token1,
-            this.USDC_ADDRESS,
-            actualToken1AmountBigInt.toString(),
-            100, // 1% slippage for cleanup
-          );
-          token1SwapResult = txResult;
-          console.log(
-            `${poolConfig.token1Name} to USDC swap successful:`,
-            txResult.transactionHash,
-          );
-        } catch (error) {
-          console.error(
-            `Failed to swap ${poolConfig.token1Name} to USDC:`,
-            error,
-          );
-        }
-      } else if (poolConfig.token1 === this.USDC_ADDRESS) {
-        console.log('Token1 is USDC, no swap needed');
-      } else {
-        console.log('Token1 has no intended amount to swap');
-      }
-
-      // Update position status to cleaned_up
+      // Store token amounts and USD values for retry (no swapping)
       await this.aerodromePositionModel.findOneAndUpdate(
         { positionId },
         {
-          status: 'cleaned_up',
+          status: 'ready_for_retry',
           metadata: {
             ...position.metadata,
-            cleanup: {
-              completedAt: new Date().toISOString(),
-              token0Swap: token0SwapResult
-                ? {
-                    transactionHash: token0SwapResult.transactionHash,
-                    status: token0SwapResult.status,
-                  }
-                : null,
-              token1Swap: token1SwapResult
-                ? {
-                    transactionHash: token1SwapResult.transactionHash,
-                    status: token1SwapResult.status,
-                  }
-                : null,
-              actualToken0Amount: actualToken0AmountBigInt.toString(),
-              actualToken1Amount: actualToken1AmountBigInt.toString(),
+            retryMetadata: {
+              originalTokenAmounts: {
+                token0: actualToken0AmountBigInt.toString(),
+                token1: actualToken1AmountBigInt.toString(),
+                totalUSDValue: totalUSDValue,
+              },
+              currentTokenAmounts: {
+                token0: actualToken0AmountBigInt.toString(),
+                token1: actualToken1AmountBigInt.toString(),
+                totalUSDValue: totalUSDValue,
+              },
+              retryAttempts: 0,
+              lastRetryAt: new Date(),
+              cleanupCompletedAt: new Date().toISOString(),
             },
           },
         },
@@ -3806,8 +4199,11 @@ export class AerodromeService {
       return {
         success: true,
         positionId,
-        token0Swap: token0SwapResult,
-        token1Swap: token1SwapResult,
+        totalUSDValue: totalUSDValue,
+        token0Amount: actualToken0AmountBigInt.toString(),
+        token1Amount: actualToken1AmountBigInt.toString(),
+        token0USDValue: token0USDValue,
+        token1USDValue: token1USDValue,
       };
     } catch (error) {
       console.error(
@@ -3917,11 +4313,11 @@ export class AerodromeService {
     try {
       console.log('=== MANUAL RETRY FAILED MINTS ===');
 
-      // Find all positions with cleaned_up status created in the past 5 minutes (matches cron frequency)
+      // Find all positions with ready_for_retry status created in the past 5 minutes (matches cron frequency)
       const fiveMinutesAgo = new Date(Date.now() - 5 * 60 * 1000);
 
       const failedPositions = await this.aerodromePositionModel.find({
-        status: 'cleaned_up',
+        status: 'ready_for_retry',
         createdAt: { $gte: fiveMinutesAgo },
       });
 
@@ -3952,16 +4348,23 @@ export class AerodromeService {
             position.metadata?.tickRange?.percentDeviation,
           );
 
+          // Use the stored USD value from retryMetadata if available, otherwise fall back to original usdcAmount
+          const retryUSDValue =
+            position.retryMetadata?.originalTokenAmounts?.totalUSDValue ||
+            position.usdcAmount;
+
           const mintParams = {
             walletLocator: position.walletLocator,
             pool: position.pool,
-            usdcAmount: position.usdcAmount,
+            usdcAmount: retryUSDValue,
             description:
               position.metadata?.description ||
               `Retry of failed position ${position.positionId}`,
             rebalancedPositionId:
               position.metadata?.rebalancedPositionId || null,
             percentDeviation: originalPercentDeviation, // Pass the original percentDeviation
+            isRebalanceOrRetry: true, // Add flag for retry/rebalancing flow
+            positionId: position.positionId, // Pass the position ID to get stored token amounts
           };
 
           console.log('Mint params with percentDeviation:', {
@@ -4421,6 +4824,228 @@ export class AerodromeService {
           },
         },
       };
+    }
+  }
+
+  async getPositionDetails(positionId: string) {
+    try {
+      console.log(`=== Getting Position Details for ${positionId} ===`);
+
+      // Get the position from database
+      const position = await this.aerodromePositionModel.findOne({
+        positionId,
+      });
+      if (!position) {
+        throw new HttpException('Position not found', 404);
+      }
+
+      // Get pool configuration
+      const poolConfig = getPoolConfig(position.pool);
+      if (!poolConfig) {
+        throw new HttpException(
+          `Pool configuration not found for: ${position.pool}`,
+          400,
+        );
+      }
+
+      console.log('Position found:', {
+        positionId: position.positionId,
+        pool: position.pool,
+        status: position.status,
+      });
+
+      // Get current token amounts
+      const { amount0, amount1, currentTick } =
+        await this.getCurrentTokenAmounts(position);
+
+      // Get current token prices
+      const token0Price = await this.getTokenPrice(poolConfig.token0Name);
+      const token1Price = await this.getTokenPrice(poolConfig.token1Name);
+
+      console.log('Token prices:', {
+        token0Name: poolConfig.token0Name,
+        token1Name: poolConfig.token1Name,
+        token0Price,
+        token1Price,
+      });
+
+      // Convert amounts to human-readable values
+      const amount0Human =
+        Number(amount0) / Math.pow(10, poolConfig.token0Decimals);
+      const amount1Human =
+        Number(amount1) / Math.pow(10, poolConfig.token1Decimals);
+
+      console.log('Token amounts (human):', {
+        amount0Human,
+        amount1Human,
+        token0Decimals: poolConfig.token0Decimals,
+        token1Decimals: poolConfig.token1Decimals,
+      });
+
+      // Calculate current dollar values
+      const token0DollarValue = amount0Human * token0Price;
+      const token1DollarValue = amount1Human * token1Price;
+      const totalCurrentDollarValue = token0DollarValue + token1DollarValue;
+
+      // Get original values for comparison
+      let originalUsdcAmount = position.usdcAmount;
+      let originalToken0Value = null;
+      let originalToken1Value = null;
+      let originalToken0Amount = null;
+      let originalToken1Amount = null;
+      let usedMintDetails = false;
+      const mintDetails = position.metadata?.mintDetails;
+
+      if (
+        mintDetails &&
+        mintDetails.token0PriceAtMint !== undefined &&
+        mintDetails.token1PriceAtMint !== undefined &&
+        mintDetails.amount0 !== undefined &&
+        mintDetails.amount1 !== undefined
+      ) {
+        // Use original token amounts and prices at mint
+        const origAmount0Human =
+          Number(mintDetails.amount0) / Math.pow(10, poolConfig.token0Decimals);
+        const origAmount1Human =
+          Number(mintDetails.amount1) / Math.pow(10, poolConfig.token1Decimals);
+        originalToken0Value =
+          origAmount0Human * Number(mintDetails.token0PriceAtMint);
+        originalToken1Value =
+          origAmount1Human * Number(mintDetails.token1PriceAtMint);
+        originalToken0Amount = origAmount0Human;
+        originalToken1Amount = origAmount1Human;
+        originalUsdcAmount = originalToken0Value + originalToken1Value;
+        usedMintDetails = true;
+      }
+
+      // Calculate percentage change
+      const percentageChange =
+        originalUsdcAmount > 0
+          ? ((totalCurrentDollarValue - originalUsdcAmount) /
+              originalUsdcAmount) *
+            100
+          : 0;
+
+      const result = {
+        positionId: position.positionId,
+        pool: {
+          name: poolConfig.name,
+          address: poolConfig.address,
+          token0: poolConfig.token0,
+          token1: poolConfig.token1,
+          token0Name: poolConfig.token0Name,
+          token1Name: poolConfig.token1Name,
+          fee: poolConfig.fee,
+        },
+        status: position.status,
+        currentTick,
+        tokenAmounts: {
+          token0: {
+            symbol: poolConfig.token0Name,
+            rawAmount: amount0.toString(),
+            humanAmount: amount0Human,
+            decimals: poolConfig.token0Decimals,
+          },
+          token1: {
+            symbol: poolConfig.token1Name,
+            rawAmount: amount1.toString(),
+            humanAmount: amount1Human,
+            decimals: poolConfig.token1Decimals,
+          },
+        },
+        tokenPrices: {
+          token0: {
+            symbol: poolConfig.token0Name,
+            price: token0Price,
+          },
+          token1: {
+            symbol: poolConfig.token1Name,
+            price: token1Price,
+          },
+        },
+        dollarValues: {
+          token0: token0DollarValue,
+          token1: token1DollarValue,
+          total: totalCurrentDollarValue,
+        },
+        originalValues: {
+          usdcAmount: originalUsdcAmount,
+          token0Value: originalToken0Value,
+          token1Value: originalToken1Value,
+          token0Amount: originalToken0Amount,
+          token1Amount: originalToken1Amount,
+          usedMintDetails,
+        },
+        performance: {
+          percentageChange,
+          absoluteChange: totalCurrentDollarValue - originalUsdcAmount,
+          isProfitable: totalCurrentDollarValue > originalUsdcAmount,
+        },
+        metadata: {
+          createdAt: (position as any).createdAt,
+          updatedAt: (position as any).updatedAt,
+          tickRange: position.metadata?.tickRange,
+          liquidity: position.metadata?.mintDetails?.liquidity,
+          collectedFees: position.collectedFees,
+        },
+      };
+
+      console.log('Position details calculated:', {
+        totalCurrentDollarValue: result.dollarValues.total,
+        originalUsdcAmount: result.originalValues.usdcAmount,
+        percentageChange: result.performance.percentageChange,
+      });
+
+      // Save the details with timestamp
+      const detailsToSave = {
+        timestamp: new Date().toISOString(),
+        tokenAmounts: {
+          token0: {
+            humanAmount: result.tokenAmounts.token0.humanAmount,
+          },
+          token1: {
+            humanAmount: result.tokenAmounts.token1.humanAmount,
+          },
+        },
+        tokenPrices: {
+          token0: {
+            price: result.tokenPrices.token0.price,
+          },
+          token1: {
+            price: result.tokenPrices.token1.price,
+          },
+        },
+        dollarValues: result.dollarValues,
+        performance: {
+          absoluteChange: result.performance.absoluteChange,
+          percentageChange: result.performance.percentageChange,
+        },
+      };
+
+      // Update the position with the new details
+      await this.aerodromePositionModel.findOneAndUpdate(
+        { positionId },
+        {
+          $push: {
+            'metadata.positionHistory': detailsToSave,
+          },
+        },
+      );
+
+      console.log('Position details saved to history:', {
+        positionId: result.positionId,
+        timestamp: detailsToSave.timestamp,
+        absoluteChange: detailsToSave.performance.absoluteChange,
+        percentageChange: detailsToSave.performance.percentageChange,
+      });
+
+      return result;
+    } catch (error) {
+      console.error(`Error getting position details for ${positionId}:`, error);
+      throw new HttpException(
+        error.message || 'Failed to get position details',
+        error.status || 500,
+      );
     }
   }
 }

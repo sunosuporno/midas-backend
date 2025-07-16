@@ -6,6 +6,7 @@ import {
   IsOptional,
   Min,
   Max,
+  IsBoolean,
 } from 'class-validator';
 
 export class CreateAerodromeLpDto {
@@ -34,4 +35,12 @@ export class CreateAerodromeLpDto {
   @Min(0.1)
   @Max(10)
   percentDeviation?: number; // Optional percent deviation for tick range (default: 1.5)
+
+  @IsOptional()
+  @IsBoolean()
+  isRebalanceOrRetry?: boolean; // Flag to indicate if this is a retry or rebalance operation
+
+  @IsOptional()
+  @IsString()
+  positionId?: string; // Position ID for retry operations to get stored token amounts
 }
