@@ -664,6 +664,19 @@ export class AerodromeService {
     );
     console.log('Extracted wallet address:', walletAddress);
 
+    // Check if wallet is currently rebalancing (only for normal mints, not retry/rebalance)
+    if (!createAerodromeLpDto.isRebalanceOrRetry) {
+      const isRebalancing = await this.isWalletRebalancing(
+        createAerodromeLpDto.walletLocator,
+      );
+      if (isRebalancing) {
+        throw new HttpException(
+          `Wallet ${createAerodromeLpDto.walletLocator} is currently undergoing rebalancing. Please try again later.`,
+          409,
+        );
+      }
+    }
+
     // BALANCE CHECKS - OUTSIDE TRY-CATCH TO AVOID CLEANUP ISSUES
     if (createAerodromeLpDto.isRebalanceOrRetry) {
       console.log('=== RETRY/REBALANCING MODE ===');
@@ -2287,6 +2300,17 @@ export class AerodromeService {
     isRebalance: boolean = false,
   ) {
     try {
+      // Check if wallet is currently rebalancing (only for normal burns, not rebalance burns)
+      if (!isRebalance) {
+        const isRebalancing = await this.isWalletRebalancing(walletLocator);
+        if (isRebalancing) {
+          throw new HttpException(
+            `Wallet ${walletLocator} is currently undergoing rebalancing. Please try again later.`,
+            409,
+          );
+        }
+      }
+
       // 1. Get the position to find the full liquidity amount
       const position = await this.aerodromePositionModel.findOne({
         'metadata.mintDetails.tokenId': tokenId.toString(),
@@ -2935,7 +2959,69 @@ export class AerodromeService {
   }
 
   // === REBALANCING LOGIC ===
+  /**
+   * Public method to add a position to rebalancing queue
+   */
   async rebalancePosition(
+    positionId: string,
+    reason: 'out_of_range' | 'dollar_fees' | 'imbalanced' | 'age_limit',
+  ) {
+    try {
+      console.log(
+        `=== Adding Position ${positionId} to Rebalancing Queue (Reason: ${reason}) ===`,
+      );
+
+      // Get the position details
+      const position = await this.aerodromePositionModel.findOne({
+        positionId,
+      });
+      if (!position) {
+        throw new HttpException(`Position ${positionId} not found`, 404);
+      }
+
+      if (position.status !== 'active') {
+        throw new HttpException(
+          `Position ${positionId} is not active (status: ${position.status})`,
+          400,
+        );
+      }
+
+      // Check if wallet is already rebalancing
+      const isRebalancing = await this.isWalletRebalancing(
+        position.walletLocator,
+      );
+      if (isRebalancing) {
+        console.log(
+          `Wallet ${position.walletLocator} is already rebalancing, adding to queue`,
+        );
+      }
+
+      // Add to wallet queue
+      await this.addToWalletQueue(position.walletLocator, positionId, reason);
+
+      return {
+        success: true,
+        message: `Position ${positionId} added to rebalancing queue`,
+        walletLocator: position.walletLocator,
+        reason,
+        queued: isRebalancing,
+      };
+    } catch (error) {
+      console.error(
+        `Error adding position ${positionId} to rebalancing queue:`,
+        error,
+      );
+      throw new HttpException(
+        `Failed to add position to rebalancing queue: ${error.message}`,
+        error.status || 500,
+      );
+    }
+  }
+
+  /**
+   * Internal method that performs the actual rebalancing
+   */
+  private async rebalancePositionInternal(
     positionId: string,
     reason: 'out_of_range' | 'dollar_fees' | 'imbalanced' | 'age_limit',
   ) {
@@ -3110,6 +3196,9 @@ export class AerodromeService {
         },
       );
 
+      // Process next position in queue for this wallet
+      await this.processNextInQueue(position.walletLocator);
+
       return {
         success: true,
         message: `Position ${positionId} rebalanced successfully`,
@@ -3141,6 +3230,14 @@ export class AerodromeService {
             },
           },
         );
+
+        // Process next position in queue even if this one failed
+        const position = await this.aerodromePositionModel.findOne({
+          positionId,
+        });
+        if (position) {
+          await this.processNextInQueue(position.walletLocator);
+        }
       } catch (updateError) {
         console.error('Failed to update position status:', updateError);
       }
@@ -3475,7 +3572,7 @@ export class AerodromeService {
    * Get positions that need rebalancing, ensuring no duplicates
    * This is the main function that will be called by the cron job
    */
-  async getPositionsNeedingRebalancing(): Promise<{
+  async getPositionsNeedingRebalancing(timeSinceLastRun?: number): Promise<{
     outOfRange: any[];
     dollarFees: any[];
     imbalanced: any[];
@@ -3484,7 +3581,7 @@ export class AerodromeService {
     try {
       console.log('=== Getting Positions Needing Rebalancing ===');
 
-      // Get active positions for current pool (excludes already rebalancing positions)
+      // Get active positions for current pool
       const activePositions = await this.getActivePositionsForCurrentPool();
 
       if (activePositions.length === 0) {
@@ -3497,6 +3594,19 @@ export class AerodromeService {
         };
       }
 
+      // Get wallets that are currently rebalancing
+      const rebalancingWallets = await this.getRebalancingWallets();
+      console.log('Wallets currently rebalancing:', rebalancingWallets);
+
+      // Filter out positions from wallets that are already rebalancing
+      const availablePositions = activePositions.filter(
+        (position) => !rebalancingWallets.includes(position.walletLocator),
+      );
+
+      console.log(
+        `Available positions (excluding rebalancing wallets): ${availablePositions.length}`,
+      );
+
       const results = {
         outOfRange: [] as any[],
         dollarFees: [] as any[],
@@ -3506,22 +3616,24 @@ export class AerodromeService {
 
       // Check for out-of-range positions (highest priority)
       const outOfRangePositions =
-        await this.getOutOfRangePositions(activePositions);
+        await this.getOutOfRangePositions(availablePositions);
       results.outOfRange = outOfRangePositions;
 
       // Check for dollar value loss positions
       const dollarValuePositions =
-        await this.getDollarValuePositions(activePositions);
+        await this.getDollarValuePositions(availablePositions);
       results.dollarFees = dollarValuePositions;
 
       // Check for imbalanced token positions
       const imbalancedPositions =
-        await this.getImbalancedPositions(activePositions);
+        await this.getImbalancedPositions(availablePositions);
       results.imbalanced = imbalancedPositions;
 
-      // Check for age-limit positions
-      const ageLimitPositions =
-        await this.getAgeLimitPositions(activePositions);
+      // Check for age-limit positions with dynamic time criteria
+      const ageLimitPositions = await this.getAgeLimitPositions(
+        availablePositions,
+        timeSinceLastRun,
+      );
       results.ageLimit = ageLimitPositions;
 
       console.log('Rebalancing analysis results:', {
@@ -4049,24 +4161,43 @@ export class AerodromeService {
    * Check which positions are older than 2 days (48 hours)
    * This triggers rebalancing for aged positions
    */
-  private async getAgeLimitPositions(activePositions: any[]): Promise<any[]> {
+  private async getAgeLimitPositions(
+    activePositions: any[],
+    timeSinceLastRun?: number,
+  ): Promise<any[]> {
     try {
       console.log('=== Checking for Age-Limit Positions ===');
       if (activePositions.length === 0) {
         console.log('No active positions to check for age limit');
         return [];
       }
+
       const now = Date.now();
-      const twoDaysAgo = now - 2 * 24 * 60 * 60 * 1000;
+
+      // Use dynamic age threshold based on time since last run
+      // If timeSinceLastRun is provided, use it as the age threshold
+      // Otherwise, fall back to 2 days (48 hours)
+      const ageThreshold = timeSinceLastRun || 2 * 24 * 60 * 60 * 1000; // Default to 48 hours
+      const thresholdTime = now - ageThreshold;
+
+      console.log(
+        `Dynamic age threshold: ${(ageThreshold / 1000 / 60 / 60).toFixed(2)} hours`,
+      );
+      console.log(
+        `Checking for positions older than: ${new Date(thresholdTime).toISOString()}`,
+      );
+
       const agedPositions = activePositions.filter((position) => {
         const createdAt = position.createdAt
           ? new Date(position.createdAt).getTime()
           : null;
         if (!createdAt) return false;
-        return createdAt < twoDaysAgo;
+        return createdAt < thresholdTime;
       });
+
+      const thresholdHours = (ageThreshold / 1000 / 60 / 60).toFixed(2);
       console.log(
-        `Found ${agedPositions.length} positions older than 2 days out of ${activePositions.length} total`,
+        `Found ${agedPositions.length} positions older than ${thresholdHours} hours out of ${activePositions.length} total`,
       );
       return agedPositions;
     } catch (error) {
@@ -4552,7 +4683,7 @@ export class AerodromeService {
    * This is the entry point that will be called by the cron job
    * Currently handles out-of-range positions, will be extended for other conditions
    */
-  async runRebalancingCron(): Promise<{
+  async runRebalancingCron(timeSinceLastRun?: number): Promise<{
     success: boolean;
     message: string;
     results: {
@@ -4592,13 +4723,22 @@ export class AerodromeService {
       console.log('=== STARTING REBALANCING CRON ===');
       const startTime = Date.now();
 
+      // Log the time since last run for debugging
+      if (timeSinceLastRun) {
+        console.log(
+          `Time since last rebalancing run: ${(timeSinceLastRun / 1000 / 60).toFixed(2)} minutes`,
+        );
+      } else {
+        console.log('No time since last run provided, using default criteria');
+      }
+
       // Get current pool being analyzed
       const currentPool = this.getCurrentPoolToAnalyze();
       console.log(`Analyzing pool: ${currentPool}`);
 
-      // Get positions that need rebalancing
+      // Get positions that need rebalancing with dynamic time criteria
       const positionsNeedingRebalancing =
-        await this.getPositionsNeedingRebalancing();
+        await this.getPositionsNeedingRebalancing(timeSinceLastRun);
 
       const results = {
         pool: currentPool,
@@ -4652,17 +4792,12 @@ export class AerodromeService {
           if (rebalanceResult.success) {
             results.outOfRange.successful++;
             console.log(
-              `✅ Successfully rebalanced position ${position.positionId}`,
-            );
-          } else if (rebalanceResult.reason === 'already_rebalancing') {
-            results.outOfRange.skipped++;
-            console.log(
-              `⏳ Position ${position.positionId} already being rebalanced, skipped`,
+              `✅ Successfully added position ${position.positionId} to rebalancing queue`,
             );
           } else {
             results.outOfRange.failed++;
             console.log(
-              `❌ Failed to rebalance position ${position.positionId}: ${rebalanceResult.message}`,
+              `❌ Failed to add position ${position.positionId} to queue: ${rebalanceResult.message}`,
             );
           }
         } catch (error) {
@@ -4695,17 +4830,12 @@ export class AerodromeService {
           if (rebalanceResult.success) {
             results.dollarFees.successful++;
             console.log(
-              `✅ Successfully rebalanced position ${position.positionId}`,
-            );
-          } else if (rebalanceResult.reason === 'already_rebalancing') {
-            results.dollarFees.skipped++;
-            console.log(
-              `⏳ Position ${position.positionId} already being rebalanced, skipped`,
+              `✅ Successfully added position ${position.positionId} to rebalancing queue`,
             );
           } else {
             results.dollarFees.failed++;
             console.log(
-              `❌ Failed to rebalance position ${position.positionId}: ${rebalanceResult.message}`,
+              `❌ Failed to add position ${position.positionId} to queue: ${rebalanceResult.message}`,
             );
           }
         } catch (error) {
@@ -4738,17 +4868,12 @@ export class AerodromeService {
           if (rebalanceResult.success) {
             results.imbalanced.successful++;
             console.log(
-              `✅ Successfully rebalanced position ${position.positionId}`,
-            );
-          } else if (rebalanceResult.reason === 'already_rebalancing') {
-            results.imbalanced.skipped++;
-            console.log(
-              `⏳ Position ${position.positionId} already being rebalanced, skipped`,
+              `✅ Successfully added position ${position.positionId} to rebalancing queue`,
             );
           } else {
             results.imbalanced.failed++;
             console.log(
-              `❌ Failed to rebalance position ${position.positionId}: ${rebalanceResult.message}`,
+              `❌ Failed to add position ${position.positionId} to queue: ${rebalanceResult.message}`,
             );
           }
         } catch (error) {
@@ -4776,17 +4901,12 @@ export class AerodromeService {
           if (rebalanceResult.success) {
             results.ageLimit.successful++;
             console.log(
-              `✅ Successfully rebalanced position ${position.positionId}`,
-            );
-          } else if (rebalanceResult.reason === 'already_rebalancing') {
-            results.ageLimit.skipped++;
-            console.log(
-              `⏳ Position ${position.positionId} already being rebalanced, skipped`,
+              `✅ Successfully added position ${position.positionId} to rebalancing queue`,
             );
           } else {
             results.ageLimit.failed++;
             console.log(
-              `❌ Failed to rebalance position ${position.positionId}: ${rebalanceResult.message}`,
+              `❌ Failed to add position ${position.positionId} to queue: ${rebalanceResult.message}`,
             );
           }
         } catch (error) {
@@ -5074,4 +5194,218 @@ export class AerodromeService {
       );
     }
   }
+
+  // === WALLET QUEUE MANAGEMENT ===
+
+  /**
+   * Get the current rebalancing state for a wallet
+   */
+  private async getWalletRebalancingState(walletLocator: string) {
+    const position = await this.aerodromePositionModel.findOne({
+      walletLocator,
+      'walletRebalancingQueue.isRebalancing': true,
+    });
+    return position?.walletRebalancingQueue;
+  }
+
+  /**
+   * Check if a wallet is currently rebalancing
+   */
+  private async isWalletRebalancing(walletLocator: string): Promise<boolean> {
+    const state = await this.getWalletRebalancingState(walletLocator);
+    return !!state?.isRebalancing;
+  }
+
+  /**
+   * Add a position to a wallet's rebalancing queue
+   */
+  private async addToWalletQueue(
+    walletLocator: string,
+    positionId: string,
+    reason: string,
+  ) {
+    console.log(
+      `Adding position ${positionId} to wallet ${walletLocator} queue`,
+    );
+
+    const existingState = await this.getWalletRebalancingState(walletLocator);
+
+    if (!existingState || !existingState.isRebalancing) {
+      // Start new rebalancing for this wallet
+      await this.startWalletRebalancing(walletLocator, positionId, reason);
+    } else {
+      // Add to existing queue
+      await this.addToExistingQueue(walletLocator, positionId);
+    }
+  }
+
+  /**
+   * Start rebalancing for a wallet (first position in queue)
+   */
+  private async startWalletRebalancing(
+    walletLocator: string,
+    positionId: string,
+    reason: string,
+  ) {
+    console.log(
+      `Starting rebalancing for wallet ${walletLocator}, position ${positionId}`,
+    );
+
+    // Update the position to start rebalancing
+    await this.aerodromePositionModel.findOneAndUpdate(
+      { positionId },
+      {
+        status: 'rebalancing',
+        $set: {
+          walletRebalancingQueue: {
+            isRebalancing: true,
+            currentPositionId: positionId,
+            queuedPositions: [],
+            startedAt: new Date(),
+            currentReason: reason,
+          },
+          'metadata.rebalancingInfo': {
+            reason,
+            startedAt: new Date().toISOString(),
+            isRebalancing: true,
+          },
+        },
+      },
+    );
+  }
+
+  /**
+   * Add a position to an existing wallet queue
+   */
+  private async addToExistingQueue(walletLocator: string, positionId: string) {
+    console.log(
+      `Adding position ${positionId} to existing queue for wallet ${walletLocator}`,
+    );
+
+    await this.aerodromePositionModel.findOneAndUpdate(
+      { walletLocator, 'walletRebalancingQueue.isRebalancing': true },
+      {
+        $push: {
+          'walletRebalancingQueue.queuedPositions': positionId,
+        },
+      },
+    );
+  }
+
+  /**
+   * Process the next position in a wallet's queue
+   */
+  private async processNextInQueue(walletLocator: string) {
+    console.log(
+      `Processing next position in queue for wallet ${walletLocator}`,
+    );
+
+    const position = await this.aerodromePositionModel.findOne({
+      walletLocator,
+      'walletRebalancingQueue.isRebalancing': true,
+    });
+
+    if (!position?.walletRebalancingQueue) {
+      console.log(`No rebalancing state found for wallet ${walletLocator}`);
+      return;
+    }
+
+    const { queuedPositions } = position.walletRebalancingQueue;
+
+    if (queuedPositions.length > 0) {
+      // Get the next position from queue
+      const nextPositionId = queuedPositions[0];
+      const remainingPositions = queuedPositions.slice(1);
+
+      console.log(`Starting rebalancing for next position: ${nextPositionId}`);
+
+      // Update the queue to remove the position we're about to process
+      await this.aerodromePositionModel.findOneAndUpdate(
+        { walletLocator, 'walletRebalancingQueue.isRebalancing': true },
+        {
+          $set: {
+            'walletRebalancingQueue.currentPositionId': nextPositionId,
+            'walletRebalancingQueue.queuedPositions': remainingPositions,
+            'walletRebalancingQueue.startedAt': new Date(),
+          },
+        },
+      );
+
+      // Start rebalancing the next position
+      await this.performRebalance(
+        nextPositionId,
+        position.walletRebalancingQueue.currentReason,
+      );
+    } else {
+      // No more positions in queue, clear the rebalancing state
+      await this.clearWalletRebalancingState(walletLocator);
+    }
+  }
+
+  /**
+   * Clear a wallet's rebalancing state
+   */
+  private async clearWalletRebalancingState(walletLocator: string) {
+    console.log(`Clearing rebalancing state for wallet ${walletLocator}`);
+
+    await this.aerodromePositionModel.updateMany(
+      { walletLocator, 'walletRebalancingQueue.isRebalancing': true },
+      {
+        $unset: {
+          walletRebalancingQueue: 1,
+        },
+      },
+    );
+  }
+
+  /**
+   * Get all wallets that are currently rebalancing
+   */
+  private async getRebalancingWallets(): Promise<string[]> {
+    const positions = await this.aerodromePositionModel.find({
+      'walletRebalancingQueue.isRebalancing': true,
+    });
+
+    return [...new Set(positions.map((pos) => pos.walletLocator))];
+  }
+
+  /**
+   * Perform the actual rebalancing operation
+   */
+  private async performRebalance(positionId: string, reason: string) {
+    // This will contain the existing rebalancePosition logic
+    // We'll move the core logic here and call it from the public method
+    return this.rebalancePositionInternal(
+      positionId,
+      reason as 'out_of_range' | 'dollar_fees' | 'imbalanced' | 'age_limit',
+    );
+  }
+
+  /**
+   * Get current queue status for a wallet (for debugging)
+   */
+  async getWalletQueueStatus(walletLocator: string) {
+    const position = await this.aerodromePositionModel.findOne({
+      walletLocator,
+      'walletRebalancingQueue.isRebalancing': true,
+    });
+
+    if (!position?.walletRebalancingQueue) {
+      return {
+        isRebalancing: false,
+        message: 'No rebalancing in progress for this wallet',
+      };
+    }
+
+    return {
+      isRebalancing: true,
+      currentPositionId: position.walletRebalancingQueue.currentPositionId,
+      queuedPositions: position.walletRebalancingQueue.queuedPositions,
+      startedAt: position.walletRebalancingQueue.startedAt,
+      currentReason: position.walletRebalancingQueue.currentReason,
+      queueLength: position.walletRebalancingQueue.queuedPositions.length,
+    };
+  }
+
+  // === REBALANCING LOGIC ===
 }

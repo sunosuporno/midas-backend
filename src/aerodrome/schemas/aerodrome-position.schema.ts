@@ -67,6 +67,16 @@ export class AerodromePosition {
       timestamp: Date;
     }>;
   };
+
+  // Wallet-level rebalancing queue system
+  @Prop({ type: Object })
+  walletRebalancingQueue?: {
+    isRebalancing: boolean;
+    currentPositionId: string;
+    queuedPositions: string[]; // Array of position IDs waiting
+    startedAt: Date;
+    currentReason: string;
+  };
 }
 
 export const AerodromePositionSchema =

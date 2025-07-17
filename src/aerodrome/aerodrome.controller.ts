@@ -12,12 +12,14 @@ import { AerodromeService } from './aerodrome.service';
 import { CreateAerodromeLpDto } from './dto/create-aerodrome-lp.dto';
 import { Public } from '../decorators/public.decorator';
 import { AerodromePositionTrackingCronService } from '../aerodrome-position-tracking-cron.service';
+import { AerodromeRebalancingCronService } from '../aerodrome-rebalancing-cron.service';
 
 @Controller('aerodrome')
 export class AerodromeController {
   constructor(
     private readonly aerodromeService: AerodromeService,
     private readonly positionTrackingCronService: AerodromePositionTrackingCronService,
+    private readonly rebalancingCronService: AerodromeRebalancingCronService,
   ) {}
 
   @Public()
@@ -164,5 +166,23 @@ export class AerodromeController {
   @Post('track-all-positions')
   async trackAllPositions() {
     return this.positionTrackingCronService.manualTrackAllPositions();
+  }
+
+  @Public()
+  @Get('queue-status/:walletLocator')
+  async getWalletQueueStatus(@Param('walletLocator') walletLocator: string) {
+    return this.aerodromeService.getWalletQueueStatus(walletLocator);
+  }
+
+  @Public()
+  @Post('rebalancing/trigger')
+  async triggerRebalancing() {
+    return this.rebalancingCronService.manualTriggerRebalancing();
+  }
+
+  @Public()
+  @Get('rebalancing/status')
+  async getRebalancingStatus() {
+    return this.rebalancingCronService.getStatus();
   }
 }
