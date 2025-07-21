@@ -175,6 +175,12 @@ export class AerodromeController {
   }
 
   @Public()
+  @Post('clear-rebalancing-state/:walletLocator')
+  async clearRebalancingState(@Param('walletLocator') walletLocator: string) {
+    return this.aerodromeService.clearWalletRebalancingState(walletLocator);
+  }
+
+  @Public()
   @Post('rebalancing/trigger')
   async triggerRebalancing() {
     return this.rebalancingCronService.manualTriggerRebalancing();

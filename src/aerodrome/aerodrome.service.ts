@@ -1315,6 +1315,42 @@ export class AerodromeService {
         },
       );
 
+      // If this is a rebalancing mint, update the old position status
+      if (createAerodromeLpDto.rebalancedPositionId) {
+        try {
+          console.log(
+            `Updating old position ${createAerodromeLpDto.rebalancedPositionId} status to rebalanced`,
+          );
+
+          await this.aerodromePositionModel.findOneAndUpdate(
+            { positionId: createAerodromeLpDto.rebalancedPositionId },
+            {
+              status: 'rebalanced',
+              $unset: {
+                'metadata.rebalancingInfo.isRebalancing': 1,
+              },
+              $set: {
+                'metadata.rebalancingInfo.completedAt':
+                  new Date().toISOString(),
+                'metadata.rebalancingInfo.success': true,
+                'metadata.rebalancingInfo.newPositionId': positionId,
+                'metadata.rebalancingInfo.mintTransactionHash':
+                  mintTxHash || mintResult?.transactionHash,
+              },
+            },
+          );
+
+          console.log(
+            `✅ Successfully updated old position ${createAerodromeLpDto.rebalancedPositionId} to rebalanced status`,
+          );
+        } catch (updateError) {
+          console.error(
+            `Failed to update old position ${createAerodromeLpDto.rebalancedPositionId} status:`,
+            updateError,
+          );
+        }
+      }
+
       // Return the position details after mint, surfacing important mint details
       return {
         positionId: positionId,
@@ -3530,49 +3566,55 @@ export class AerodromeService {
 
   // === POSITION ANALYSIS METHODS ===
 
-  // Pool rotation system for cost optimization
-  private readonly POOL_ROTATION_INTERVAL = 2 * 60 * 1000; // 2 minutes in milliseconds
+  // Remove the pool rotation interval since we're now evaluating all pools
+  // private readonly POOL_ROTATION_INTERVAL = 2 * 60 * 1000; // 2 minutes in milliseconds
 
   /**
-   * Get the pool that should be analyzed in the current cron run
-   * Uses a simple time-based rotation to minimize costs
+   * Get all pools that should be analyzed in the current cron run
+   * Now evaluates all pools simultaneously instead of rotating
    */
-  private getCurrentPoolToAnalyze(): string {
-    const now = Date.now();
-    const pools = ['weth-usdc', 'usdc-usd+'];
-    const rotationIndex =
-      Math.floor(now / this.POOL_ROTATION_INTERVAL) % pools.length; // 4 pools
-
-    console.log(
-      `Pool rotation: Index ${rotationIndex}, analyzing pool: ${pools[rotationIndex]}`,
-    );
-    return pools[rotationIndex];
+  private getAllPoolsToAnalyze(): string[] {
+    const pools = ['weth-usdc']; // Temporarily disable usdc-usd+ until we have the correct address
+    console.log(`Analyzing all pools simultaneously: ${pools.join(', ')}`);
+    return pools;
   }
 
   /**
-   * Get all active positions for the current pool being analyzed
+   * Get all active positions across all pools
    */
-  async getActivePositionsForCurrentPool(): Promise<any[]> {
-    const currentPool = this.getCurrentPoolToAnalyze();
+  async getAllActivePositions(): Promise<any[]> {
+    const allPools = this.getAllPoolsToAnalyze();
 
-    console.log(`=== Analyzing Pool: ${currentPool} ===`);
+    console.log(`=== Analyzing All Pools: ${allPools.join(', ')} ===`);
 
-    const positions = await this.aerodromePositionModel.find({
+    const allPositions = await this.aerodromePositionModel.find({
       status: 'active',
-      pool: currentPool,
+      pool: { $in: allPools },
     });
 
     console.log(
-      `Found ${positions.length} active positions in pool ${currentPool}`,
+      `Found ${allPositions.length} active positions across all pools`,
     );
-    return positions;
+
+    // Group positions by pool for logging
+    const positionsByPool = allPools.reduce(
+      (acc, pool) => {
+        acc[pool] = allPositions.filter((pos) => pos.pool === pool).length;
+        return acc;
+      },
+      {} as Record<string, number>,
+    );
+
+    console.log('Positions by pool:', positionsByPool);
+
+    return allPositions;
   }
 
   /**
    * Get positions that need rebalancing, ensuring no duplicates
    * This is the main function that will be called by the cron job
    */
-  async getPositionsNeedingRebalancing(timeSinceLastRun?: number): Promise<{
+  async getPositionsNeedingRebalancing(): Promise<{
     outOfRange: any[];
     dollarFees: any[];
     imbalanced: any[];
@@ -3582,7 +3624,7 @@ export class AerodromeService {
       console.log('=== Getting Positions Needing Rebalancing ===');
 
       // Get active positions for current pool
-      const activePositions = await this.getActivePositionsForCurrentPool();
+      const activePositions = await this.getAllActivePositions();
 
       if (activePositions.length === 0) {
         console.log('No active positions found for current pool');
@@ -3594,9 +3636,21 @@ export class AerodromeService {
         };
       }
 
-      // Get wallets that are currently rebalancing
+      // Get wallets that are currently rebalancing (this will automatically clear stuck states)
       const rebalancingWallets = await this.getRebalancingWallets();
       console.log('Wallets currently rebalancing:', rebalancingWallets);
+
+      // Debug: Check if the stuck wallet is being cleared
+      const stuckWallet = '0xF2de711e43409f64aD848449612Ba4069DE418E5';
+      if (rebalancingWallets.includes(stuckWallet)) {
+        console.log(
+          `⚠️  WARNING: Wallet ${stuckWallet} is still in rebalancing state and will be excluded`,
+        );
+      } else {
+        console.log(
+          `✅ SUCCESS: Wallet ${stuckWallet} is no longer in rebalancing state`,
+        );
+      }
 
       // Filter out positions from wallets that are already rebalancing
       const availablePositions = activePositions.filter(
@@ -3614,6 +3668,8 @@ export class AerodromeService {
         ageLimit: [] as any[],
       };
 
+      console.log('availablePositions', availablePositions);
+
       // Check for out-of-range positions (highest priority)
       const outOfRangePositions =
         await this.getOutOfRangePositions(availablePositions);
@@ -3629,11 +3685,9 @@ export class AerodromeService {
         await this.getImbalancedPositions(availablePositions);
       results.imbalanced = imbalancedPositions;
 
-      // Check for age-limit positions with dynamic time criteria
-      const ageLimitPositions = await this.getAgeLimitPositions(
-        availablePositions,
-        timeSinceLastRun,
-      );
+      // Check for age-limit positions (24 hours threshold)
+      const ageLimitPositions =
+        await this.getAgeLimitPositions(availablePositions);
       results.ageLimit = ageLimitPositions;
 
       console.log('Rebalancing analysis results:', {
@@ -3663,59 +3717,79 @@ export class AerodromeService {
         return [];
       }
 
-      // Get current pool being analyzed
-      const currentPool = this.getCurrentPoolToAnalyze();
-      const poolConfig = getPoolConfig(currentPool);
+      // Get all pools to analyze
+      const allPools = this.getAllPoolsToAnalyze();
+      const outOfRangePositions: any[] = [];
 
-      if (!poolConfig) {
-        console.warn(`Pool config not found for pool ${currentPool}`);
-        return [];
+      // Check each pool for out-of-range positions
+      for (const pool of allPools) {
+        const poolConfig = getPoolConfig(pool);
+
+        if (!poolConfig) {
+          console.warn(`Pool config not found for pool ${pool}`);
+          continue;
+        }
+
+        // Get current tick from pool (single blockchain call per pool)
+        const slot0Result = await this.readContract(
+          poolConfig.address,
+          poolAbi as unknown as any[],
+          'slot0',
+          [],
+        );
+        const decodedResult = this.decodeSlot0Result(slot0Result);
+        const currentTick = decodedResult.tick;
+
+        console.log(`Pool ${pool} current tick: ${currentTick}`);
+
+        // Filter positions for this specific pool that are out of range
+        const poolPositions = activePositions.filter(
+          (pos) => pos.pool === pool,
+        );
+        console.log(`Found ${poolPositions.length} positions for pool ${pool}`);
+
+        const poolOutOfRangePositions = poolPositions.filter((position) => {
+          const tickRange = position.metadata?.tickRange;
+
+          if (
+            !tickRange ||
+            tickRange.tickLower === undefined ||
+            tickRange.tickUpper === undefined
+          ) {
+            console.warn(
+              `Position ${position.positionId} missing tick range data`,
+            );
+            return false;
+          }
+
+          const isOutOfRange =
+            currentTick < tickRange.tickLower ||
+            currentTick > tickRange.tickUpper;
+
+          console.log(`Position ${position.positionId} tick check:`, {
+            currentTick,
+            tickLower: tickRange.tickLower,
+            tickUpper: tickRange.tickUpper,
+            isOutOfRange,
+            belowLower: currentTick < tickRange.tickLower,
+            aboveUpper: currentTick > tickRange.tickUpper,
+          });
+
+          if (isOutOfRange) {
+            console.log(
+              `Position ${position.positionId} is out of range: current tick ${currentTick} outside range [${tickRange.tickLower}, ${tickRange.tickUpper}]`,
+            );
+          }
+
+          return isOutOfRange;
+        });
+
+        outOfRangePositions.push(...poolOutOfRangePositions);
       }
 
-      // Get current tick from pool (single blockchain call)
-      const slot0Result = await this.readContract(
-        poolConfig.address,
-        poolAbi as unknown as any[],
-        'slot0',
-        [],
+      console.log(
+        `Found ${outOfRangePositions.length} out-of-range positions across all pools`,
       );
-      const decodedResult = this.decodeSlot0Result(slot0Result);
-      const currentTick = decodedResult.tick;
-
-      console.log(`Pool ${currentPool} current tick: ${currentTick}`);
-
-      // Filter positions that are out of range
-      const outOfRangePositions = activePositions.filter((position) => {
-        const tickRange = position.metadata?.tickRange;
-
-        if (
-          !tickRange ||
-          tickRange.tickLower === undefined ||
-          tickRange.tickUpper === undefined
-        ) {
-          console.warn(
-            `Position ${position.positionId} missing tick range data`,
-          );
-          return false;
-        }
-
-        const tickLower = tickRange.tickLower;
-        const tickUpper = tickRange.tickUpper;
-
-        // Position is out of range if current tick is outside the position's range
-        const isOutOfRange = currentTick < tickLower || currentTick > tickUpper;
-
-        if (isOutOfRange) {
-          console.log(`Position ${position.positionId} is OUT OF RANGE:`, {
-            currentTick,
-            tickLower,
-            tickUpper,
-            reason: currentTick < tickLower ? 'below_lower' : 'above_upper',
-          });
-        }
-
-        return isOutOfRange;
-      });
       return outOfRangePositions;
     } catch (error) {
       console.error('Error checking for out-of-range positions:', error);
@@ -3845,149 +3919,83 @@ export class AerodromeService {
         return [];
       }
 
-      // Get current pool being analyzed
-      const currentPool = this.getCurrentPoolToAnalyze();
-      const poolConfig = getPoolConfig(currentPool);
-
-      if (!poolConfig) {
-        console.warn(`Pool config not found for pool ${currentPool}`);
-        return [];
-      }
-
+      // Get all pools to analyze
+      const allPools = this.getAllPoolsToAnalyze();
       const dollarValuePositions: any[] = [];
 
-      // Check each position for dollar value loss
-      for (const position of activePositions) {
-        try {
-          console.log(
-            `Checking dollar value for position ${position.positionId}`,
-          );
+      // Check each pool for dollar value loss positions
+      for (const pool of allPools) {
+        const poolConfig = getPoolConfig(pool);
 
-          // Get current token amounts
-          const { amount0, amount1 } =
-            await this.getCurrentTokenAmounts(position);
+        if (!poolConfig) {
+          console.warn(`Pool config not found for pool ${pool}`);
+          continue;
+        }
 
-          // Get token prices
-          const token0Price = await this.getTokenPrice(poolConfig.token0Name);
-          const token1Price = await this.getTokenPrice(poolConfig.token1Name);
+        // Filter positions for this specific pool
+        const poolPositions = activePositions.filter(
+          (pos) => pos.pool === pool,
+        );
 
-          console.log('Token prices:', {
-            token0Name: poolConfig.token0Name,
-            token1Name: poolConfig.token1Name,
-            token0Price,
-            token1Price,
-          });
-
-          // Convert amounts to human-readable values
-          const amount0Human =
-            Number(amount0) / Math.pow(10, poolConfig.token0Decimals);
-          const amount1Human =
-            Number(amount1) / Math.pow(10, poolConfig.token1Decimals);
-
-          console.log('Token amounts (human):', {
-            amount0Human,
-            amount1Human,
-            token0Decimals: poolConfig.token0Decimals,
-            token1Decimals: poolConfig.token1Decimals,
-          });
-
-          // Calculate current dollar values
-          const token0DollarValue = amount0Human * token0Price;
-          const token1DollarValue = amount1Human * token1Price;
-          const totalCurrentDollarValue = token0DollarValue + token1DollarValue;
-
-          // === NEW: Calculate original value using mintDetails if available ===
-          let originalUsdcAmount = position.usdcAmount;
-          let originalToken0Value = null;
-          let originalToken1Value = null;
-          let usedMintDetails = false;
-          const mintDetails = position.metadata?.mintDetails;
-          if (
-            mintDetails &&
-            mintDetails.token0PriceAtMint !== undefined &&
-            mintDetails.token1PriceAtMint !== undefined &&
-            mintDetails.amount0 !== undefined &&
-            mintDetails.amount1 !== undefined
-          ) {
-            // Use original token amounts and prices at mint
-            const origAmount0Human =
-              Number(mintDetails.amount0) /
-              Math.pow(10, poolConfig.token0Decimals);
-            const origAmount1Human =
-              Number(mintDetails.amount1) /
-              Math.pow(10, poolConfig.token1Decimals);
-            originalToken0Value =
-              origAmount0Human * Number(mintDetails.token0PriceAtMint);
-            originalToken1Value =
-              origAmount1Human * Number(mintDetails.token1PriceAtMint);
-            originalUsdcAmount = originalToken0Value + originalToken1Value;
-            usedMintDetails = true;
-          }
-
-          const thresholdAmount = originalUsdcAmount * 0.95; // 95% of original
-
-          console.log('Dollar value analysis:', {
-            token0DollarValue,
-            token1DollarValue,
-            totalCurrentDollarValue,
-            originalUsdcAmount,
-            thresholdAmount,
-            percentageOfOriginal:
-              (totalCurrentDollarValue / originalUsdcAmount) * 100,
-            usedMintDetails,
-            originalToken0Value,
-            originalToken1Value,
-          });
-
-          // Check if current value is below 95% of original
-          if (totalCurrentDollarValue < thresholdAmount) {
+        // Check each position for dollar value loss
+        for (const position of poolPositions) {
+          try {
             console.log(
-              `Position ${position.positionId} has DOLLAR VALUE LOSS:`,
-              {
-                currentValue: totalCurrentDollarValue,
-                originalValue: originalUsdcAmount,
-                lossPercentage:
-                  ((originalUsdcAmount - totalCurrentDollarValue) /
-                    originalUsdcAmount) *
-                  100,
-                threshold: thresholdAmount,
-                usedMintDetails,
-                originalToken0Value,
-                originalToken1Value,
-              },
+              `Checking dollar value for position ${position.positionId} in pool ${pool}`,
             );
 
-            // Add position to rebalancing list
-            position.dollarValueAnalysis = {
-              token0DollarValue,
-              token1DollarValue,
-              totalCurrentDollarValue,
+            // Get current token amounts
+            const { amount0, amount1 } =
+              await this.getCurrentTokenAmounts(position);
+
+            // Get token prices
+            const token0Price = await this.getTokenPrice(poolConfig.token0Name);
+            const token1Price = await this.getTokenPrice(poolConfig.token1Name);
+
+            // Convert amounts to human-readable values
+            const amount0Human =
+              Number(amount0) / Math.pow(10, poolConfig.token0Decimals);
+            const amount1Human =
+              Number(amount1) / Math.pow(10, poolConfig.token1Decimals);
+
+            // Calculate current dollar values
+            const token0DollarValue = amount0Human * token0Price;
+            const token1DollarValue = amount1Human * token1Price;
+            const totalDollarValue = token0DollarValue + token1DollarValue;
+
+            // Get original USDC amount
+            const originalUsdcAmount = position.usdcAmount;
+
+            // Calculate loss percentage
+            const lossPercentage =
+              ((originalUsdcAmount - totalDollarValue) / originalUsdcAmount) *
+              100;
+
+            console.log('Dollar value analysis:', {
+              positionId: position.positionId,
               originalUsdcAmount,
-              lossPercentage:
-                ((originalUsdcAmount - totalCurrentDollarValue) /
-                  originalUsdcAmount) *
-                100,
-              usedMintDetails,
-              originalToken0Value,
-              originalToken1Value,
-            };
-            dollarValuePositions.push(position);
-          } else {
-            console.log(
-              `Position ${position.positionId} dollar value OK: ${totalCurrentDollarValue} >= ${thresholdAmount}`,
+              totalDollarValue,
+              lossPercentage: lossPercentage.toFixed(2) + '%',
+            });
+
+            // Check if loss is significant (>2%)
+            if (lossPercentage > 2) {
+              console.log(
+                `Position ${position.positionId} has significant dollar value loss: ${lossPercentage.toFixed(2)}%`,
+              );
+              dollarValuePositions.push(position);
+            }
+          } catch (error) {
+            console.error(
+              `Error checking dollar value for position ${position.positionId}:`,
+              error,
             );
           }
-        } catch (error) {
-          console.error(
-            `Error checking dollar value for position ${position.positionId}:`,
-            error,
-          );
-          // Continue with other positions instead of failing completely
         }
       }
 
       console.log(
-        `Found ${dollarValuePositions.length} dollar value loss positions out of ${activePositions.length} total`,
+        `Found ${dollarValuePositions.length} positions with significant dollar value loss across all pools`,
       );
       return dollarValuePositions;
     } catch (error) {
@@ -4011,7 +4019,7 @@ export class AerodromeService {
       }
 
       // Get current pool being analyzed
-      const currentPool = this.getCurrentPoolToAnalyze();
+      const currentPool = this.getAllPoolsToAnalyze()[0];
       const poolConfig = getPoolConfig(currentPool);
 
       if (!poolConfig) {
@@ -4161,10 +4169,7 @@ export class AerodromeService {
    * Check which positions are older than 2 days (48 hours)
    * This triggers rebalancing for aged positions
    */
-  private async getAgeLimitPositions(
-    activePositions: any[],
-    timeSinceLastRun?: number,
-  ): Promise<any[]> {
+  private async getAgeLimitPositions(activePositions: any[]): Promise<any[]> {
     try {
       console.log('=== Checking for Age-Limit Positions ===');
       if (activePositions.length === 0) {
@@ -4174,10 +4179,9 @@ export class AerodromeService {
 
       const now = Date.now();
 
-      // Use dynamic age threshold based on time since last run
-      // If timeSinceLastRun is provided, use it as the age threshold
-      // Otherwise, fall back to 2 days (48 hours)
-      const ageThreshold = timeSinceLastRun || 2 * 24 * 60 * 60 * 1000; // Default to 48 hours
+      // Use a fixed age threshold of 24 hours for age-limit rebalancing
+      // This is separate from timeSinceLastRun which is used for cron scheduling
+      const ageThreshold = 24 * 60 * 60 * 1000; // 24 hours
       const thresholdTime = now - ageThreshold;
 
       console.log(
@@ -4687,7 +4691,7 @@ export class AerodromeService {
     success: boolean;
     message: string;
     results: {
-      pool: string;
+      pools: string;
       totalPositions: number;
       outOfRange: {
         found: number;
@@ -4732,16 +4736,16 @@ export class AerodromeService {
         console.log('No time since last run provided, using default criteria');
       }
 
-      // Get current pool being analyzed
-      const currentPool = this.getCurrentPoolToAnalyze();
-      console.log(`Analyzing pool: ${currentPool}`);
+      // Get all pools being analyzed
+      const allPools = this.getAllPoolsToAnalyze();
+      console.log(`Analyzing all pools: ${allPools.join(', ')}`);
 
       // Get positions that need rebalancing with dynamic time criteria
       const positionsNeedingRebalancing =
-        await this.getPositionsNeedingRebalancing(timeSinceLastRun);
+        await this.getPositionsNeedingRebalancing();
 
       const results = {
-        pool: currentPool,
+        pools: allPools.join(', '),
         totalPositions: 0,
         outOfRange: {
           found: 0,
@@ -4938,7 +4942,7 @@ export class AerodromeService {
         success: false,
         message: `Rebalancing cron failed: ${error.message}`,
         results: {
-          pool: this.getCurrentPoolToAnalyze(),
+          pools: this.getAllPoolsToAnalyze().join(', '),
           totalPositions: 0,
           outOfRange: {
             found: 0,
@@ -5251,7 +5255,23 @@ export class AerodromeService {
       `Starting rebalancing for wallet ${walletLocator}, position ${positionId}`,
     );
 
-    // Update the position to start rebalancing
+    // Actually start the rebalancing process FIRST
+    try {
+      console.log(`Starting actual rebalancing for position ${positionId}`);
+      await this.performRebalance(positionId, reason);
+    } catch (error) {
+      console.error(
+        `Failed to start rebalancing for position ${positionId}:`,
+        error,
+      );
+
+      // Clear the rebalancing state on failure
+      await this.clearWalletRebalancingState(walletLocator);
+
+      throw error;
+    }
+
+    // Update the position to mark rebalancing as started (after successful start)
     await this.aerodromePositionModel.findOneAndUpdate(
       { positionId },
       {
@@ -5345,7 +5365,7 @@ export class AerodromeService {
   /**
    * Clear a wallet's rebalancing state
    */
-  private async clearWalletRebalancingState(walletLocator: string) {
+  async clearWalletRebalancingState(walletLocator: string) {
     console.log(`Clearing rebalancing state for wallet ${walletLocator}`);
 
     await this.aerodromePositionModel.updateMany(
@@ -5366,19 +5386,82 @@ export class AerodromeService {
       'walletRebalancingQueue.isRebalancing': true,
     });
 
-    return [...new Set(positions.map((pos) => pos.walletLocator))];
+    // Check for stuck rebalancing states (older than 30 minutes)
+    const thirtyMinutesAgo = new Date(Date.now() - 30 * 60 * 1000);
+    console.log(
+      `Checking for stuck rebalancing states older than: ${thirtyMinutesAgo.toISOString()}`,
+    );
+
+    const stuckPositions = positions.filter((pos) => {
+      const startedAt = pos.walletRebalancingQueue?.startedAt;
+      const isStuck = startedAt && new Date(startedAt) < thirtyMinutesAgo;
+      if (isStuck) {
+        console.log(
+          `Found stuck position for wallet ${pos.walletLocator}, started at: ${startedAt}`,
+        );
+      }
+      return isStuck;
+    });
+
+    if (stuckPositions.length > 0) {
+      console.log(
+        `Found ${stuckPositions.length} stuck rebalancing states, clearing them...`,
+      );
+
+      for (const position of stuckPositions) {
+        console.log(
+          `Clearing stuck rebalancing state for wallet ${position.walletLocator}`,
+        );
+        await this.clearWalletRebalancingState(position.walletLocator);
+      }
+    }
+
+    // Get the updated list after clearing stuck states
+    const updatedPositions = await this.aerodromePositionModel.find({
+      'walletRebalancingQueue.isRebalancing': true,
+    });
+
+    return [...new Set(updatedPositions.map((pos) => pos.walletLocator))];
   }
 
   /**
    * Perform the actual rebalancing operation
    */
   private async performRebalance(positionId: string, reason: string) {
-    // This will contain the existing rebalancePosition logic
-    // We'll move the core logic here and call it from the public method
-    return this.rebalancePositionInternal(
-      positionId,
-      reason as 'out_of_range' | 'dollar_fees' | 'imbalanced' | 'age_limit',
-    );
+    // Add timeout protection for rebalancing operations
+    const timeoutMs = 25 * 60 * 1000; // 25 minutes timeout
+
+    try {
+      const timeoutPromise = new Promise((_, reject) => {
+        setTimeout(() => {
+          reject(new Error('Rebalancing operation timed out after 25 minutes'));
+        }, timeoutMs);
+      });
+
+      const rebalancePromise = this.rebalancePositionInternal(
+        positionId,
+        reason as 'out_of_range' | 'dollar_fees' | 'imbalanced' | 'age_limit',
+      );
+
+      // Race between timeout and actual rebalancing
+      return await Promise.race([rebalancePromise, timeoutPromise]);
+    } catch (error) {
+      console.error(`Rebalancing failed for position ${positionId}:`, error);
+
+      // Clear the rebalancing state on timeout or failure
+      try {
+        const position = await this.aerodromePositionModel.findOne({
+          positionId,
+        });
+        if (position) {
+          await this.clearWalletRebalancingState(position.walletLocator);
+        }
+      } catch (clearError) {
+        console.error('Failed to clear rebalancing state:', clearError);
+      }
+
+      throw error;
+    }
   }
 
   /**

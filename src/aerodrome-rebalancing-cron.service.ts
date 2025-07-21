@@ -47,7 +47,7 @@ export class AerodromeRebalancingCronService implements OnModuleInit {
     console.log(`Initial run starting immediately...`);
 
     // Start the first rebalancing run immediately
-    this.scheduleNextRun();
+    this.runRebalancing();
   }
 
   private scheduleNextRun() {
@@ -73,11 +73,12 @@ export class AerodromeRebalancingCronService implements OnModuleInit {
 
     this.isRunning = true;
     const startTime = Date.now();
+    const previousRunTime = this.lastRunTime;
     this.lastRunTime = new Date();
 
     // Calculate time since last run for dynamic search criteria
-    this.timeSinceLastRun = this.lastRunTime
-      ? Date.now() - this.lastRunTime.getTime()
+    this.timeSinceLastRun = previousRunTime
+      ? Date.now() - previousRunTime.getTime()
       : this.REBALANCING_INTERVAL; // Default to interval if no previous run
 
     console.log(
