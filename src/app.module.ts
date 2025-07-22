@@ -10,8 +10,8 @@ import { ApiKey, ApiKeySchema } from './schemas/api-key.schema';
 // import { TwitterModule } from './twitter/twitter.module';
 // import { MentionCronService } from './mention-cron.service';
 import { AerodromeRebalancingCronService } from './aerodrome-rebalancing-cron.service';
-
 import { AerodromePositionTrackingCronService } from './aerodrome-position-tracking-cron.service';
+import { AerodromeFeeOptimiserRebalancingCronService } from './aerodrome-fee-optimiser-rebalancing-cron.service';
 import { User, UserSchema } from './schemas/user.schema';
 import { PendingTip, PendingTipSchema } from './schemas/pending-tip.schema';
 import { AerodromeController } from './aerodrome/aerodrome.controller';
@@ -46,8 +46,8 @@ import {
     CrossmintJwtGuard,
     // MentionCronService,
     AerodromeRebalancingCronService,
-
     AerodromePositionTrackingCronService,
+    AerodromeFeeOptimiserRebalancingCronService,
   ],
 })
 export class AppModule {}

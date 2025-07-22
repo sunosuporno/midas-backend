@@ -13,6 +13,7 @@ import { CreateAerodromeLpDto } from './dto/create-aerodrome-lp.dto';
 import { Public } from '../decorators/public.decorator';
 import { AerodromePositionTrackingCronService } from '../aerodrome-position-tracking-cron.service';
 import { AerodromeRebalancingCronService } from '../aerodrome-rebalancing-cron.service';
+import { AerodromeFeeOptimiserRebalancingCronService } from '../aerodrome-fee-optimiser-rebalancing-cron.service';
 
 @Controller('aerodrome')
 export class AerodromeController {
@@ -20,6 +21,7 @@ export class AerodromeController {
     private readonly aerodromeService: AerodromeService,
     private readonly positionTrackingCronService: AerodromePositionTrackingCronService,
     private readonly rebalancingCronService: AerodromeRebalancingCronService,
+    private readonly feeOptimiserRebalancingCronService: AerodromeFeeOptimiserRebalancingCronService,
   ) {}
 
   @Public()
@@ -190,5 +192,23 @@ export class AerodromeController {
   @Get('rebalancing/status')
   async getRebalancingStatus() {
     return this.rebalancingCronService.getStatus();
+  }
+
+  @Public()
+  @Post('delete-junk-positions')
+  async deleteJunkPositions() {
+    return this.aerodromeService.deleteJunkPositions();
+  }
+
+  @Public()
+  @Post('fee-optimiser-rebalancing/trigger')
+  async triggerFeeOptimiserRebalancing() {
+    return this.feeOptimiserRebalancingCronService.manualTriggerFeeOptimiserRebalancing();
+  }
+
+  @Public()
+  @Get('fee-optimiser-rebalancing/status')
+  async getFeeOptimiserRebalancingStatus() {
+    return this.feeOptimiserRebalancingCronService.getStatus();
   }
 }

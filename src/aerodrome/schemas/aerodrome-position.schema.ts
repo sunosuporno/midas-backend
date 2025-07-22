@@ -36,7 +36,16 @@ export class AerodromePosition {
   lpTokens?: number;
 
   @Prop({ type: Object })
-  metadata?: Record<string, any>; // mintDetails now includes token0PriceAtMint and token1PriceAtMint
+  metadata?: {
+    strategyName?: string;
+    tickRange?: any;
+    tickRange05?: any;
+    tickRange3?: any;
+    mintWethPrice?: number;
+    mintDetails?: any;
+    retryMetadata?: any;
+    [key: string]: any;
+  }; // mintDetails now includes token0PriceAtMint and token1PriceAtMint
 
   @Prop({ type: Object, default: { token0: '0', token1: '0' } })
   collectedFees?: {

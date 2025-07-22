@@ -811,6 +811,26 @@ export class AerodromeService {
 
       console.log('Calculated tick range for LP:', tickRange);
 
+      // Handle fee-optimiser strategy: calculate 3% tick range
+      let tickRange3 = null;
+
+      if (createAerodromeLpDto.strategyName === 'fee-optimiser') {
+        console.log(
+          '=== FEE-OPTIMISER STRATEGY: Calculating 3% tick range ===',
+        );
+
+        // Calculate 3% tick range (0.5% is already in tickRange)
+        tickRange3 = await this.calculateTickRange(
+          poolConfig.address,
+          poolConfig.tickSpacing,
+          3.0,
+        );
+
+        console.log('Fee-optimiser additional data:', {
+          tickRange3,
+        });
+      }
+
       // Calculate liquidity amounts and determine limiting token
       const liquidityAmounts = await this.calculateLiquidityAmounts(
         poolConfig,
@@ -837,6 +857,7 @@ export class AerodromeService {
           description: poolConfig.description,
           rebalancedPositionId:
             createAerodromeLpDto.rebalancedPositionId || null,
+          strategyName: createAerodromeLpDto.strategyName || null,
           tickRange: {
             tickCurrent: tickRange.tickCurrent,
             tickLower: tickRange.tickLower,
@@ -847,6 +868,10 @@ export class AerodromeService {
             percentDeviation: percentDeviation,
             tickSpacing: tickRange.tickSpacing,
           },
+          // Fee-optimiser specific data
+          ...(createAerodromeLpDto.strategyName === 'fee-optimiser' && {
+            tickRange3,
+          }),
           tokenAmounts: {
             token0Amount: tokenAmounts.token0Amount,
             token1Amount: tokenAmounts.token1Amount,
@@ -3000,58 +3025,15 @@ export class AerodromeService {
    */
   async rebalancePosition(
     positionId: string,
-    reason: 'out_of_range' | 'dollar_fees' | 'imbalanced' | 'age_limit',
+    reason:
+      | 'out_of_range'
+      | 'dollar_fees'
+      | 'imbalanced'
+      | 'age_limit'
+      | 'fee_optimiser',
+    strategyName?: string,
   ) {
-    try {
-      console.log(
-        `=== Adding Position ${positionId} to Rebalancing Queue (Reason: ${reason}) ===`,
-      );
-
-      // Get the position details
-      const position = await this.aerodromePositionModel.findOne({
-        positionId,
-      });
-      if (!position) {
-        throw new HttpException(`Position ${positionId} not found`, 404);
-      }
-
-      if (position.status !== 'active') {
-        throw new HttpException(
-          `Position ${positionId} is not active (status: ${position.status})`,
-          400,
-        );
-      }
-
-      // Check if wallet is already rebalancing
-      const isRebalancing = await this.isWalletRebalancing(
-        position.walletLocator,
-      );
-      if (isRebalancing) {
-        console.log(
-          `Wallet ${position.walletLocator} is already rebalancing, adding to queue`,
-        );
-      }
-
-      // Add to wallet queue
-      await this.addToWalletQueue(position.walletLocator, positionId, reason);
-
-      return {
-        success: true,
-        message: `Position ${positionId} added to rebalancing queue`,
-        walletLocator: position.walletLocator,
-        reason,
-        queued: isRebalancing,
-      };
-    } catch (error) {
-      console.error(
-        `Error adding position ${positionId} to rebalancing queue:`,
-        error,
-      );
-      throw new HttpException(
-        `Failed to add position to rebalancing queue: ${error.message}`,
-        error.status || 500,
-      );
-    }
+    return this.rebalancePositionInternal(positionId, reason, strategyName);
   }
 
   /**
@@ -3059,7 +3041,13 @@ export class AerodromeService {
    */
   private async rebalancePositionInternal(
     positionId: string,
-    reason: 'out_of_range' | 'dollar_fees' | 'imbalanced' | 'age_limit',
+    reason:
+      | 'out_of_range'
+      | 'dollar_fees'
+      | 'imbalanced'
+      | 'age_limit'
+      | 'fee_optimiser',
+    strategyName?: string,
   ) {
     try {
       console.log(
@@ -3151,6 +3139,9 @@ export class AerodromeService {
         position.metadata?.tickRange?.percentDeviation,
       );
 
+      // Pass strategyName to mint function to preserve strategy
+      // Note: strategyName will be added to the final mintDto below
+
       // Store the token amounts from burn result in the original position for rebalancing
       if (burnResult.tokenAmountsForRebalance) {
         console.log(
@@ -3197,6 +3188,10 @@ export class AerodromeService {
       // Create a proper DTO instance to ensure validation works correctly
       const mintDto = new CreateAerodromeLpDto();
       Object.assign(mintDto, newPositionDto);
+      // Add strategyName if it exists
+      if (strategyName) {
+        mintDto.strategyName = strategyName;
+      }
 
       console.log('Rebalance created DTO instance:', {
         dtoKeys: Object.keys(mintDto),
@@ -3654,7 +3649,9 @@ export class AerodromeService {
 
       // Filter out positions from wallets that are already rebalancing
       const availablePositions = activePositions.filter(
-        (position) => !rebalancingWallets.includes(position.walletLocator),
+        (position) =>
+          !rebalancingWallets.includes(position.walletLocator) &&
+          position.metadata?.strategyName !== 'fee-optimiser',
       );
 
       console.log(
@@ -4365,6 +4362,7 @@ export class AerodromeService {
               originalPosition.metadata?.rebalancedPositionId || null,
             percentDeviation:
               originalPosition.metadata?.tickRange?.percentDeviation || 1.5,
+            strategyName: originalPosition.metadata?.strategyName || null, // Preserve strategy
             isRebalanceOrRetry: true,
             positionId: positionId, // Pass the position ID to get stored token amounts
           });
@@ -4791,6 +4789,7 @@ export class AerodromeService {
           const rebalanceResult = await this.rebalancePosition(
             position.positionId,
             'out_of_range',
+            position.metadata?.strategyName,
           );
 
           if (rebalanceResult.success) {
@@ -4829,6 +4828,7 @@ export class AerodromeService {
           const rebalanceResult = await this.rebalancePosition(
             position.positionId,
             'dollar_fees',
+            position.metadata?.strategyName,
           );
 
           if (rebalanceResult.success) {
@@ -4867,6 +4867,7 @@ export class AerodromeService {
           const rebalanceResult = await this.rebalancePosition(
             position.positionId,
             'imbalanced',
+            position.metadata?.strategyName,
           );
 
           if (rebalanceResult.success) {
@@ -4900,6 +4901,7 @@ export class AerodromeService {
           const rebalanceResult = await this.rebalancePosition(
             position.positionId,
             'age_limit',
+            position.metadata?.strategyName,
           );
 
           if (rebalanceResult.success) {
@@ -5366,16 +5368,90 @@ export class AerodromeService {
    * Clear a wallet's rebalancing state
    */
   async clearWalletRebalancingState(walletLocator: string) {
-    console.log(`Clearing rebalancing state for wallet ${walletLocator}`);
+    try {
+      console.log(`=== Clearing Rebalancing State for ${walletLocator} ===`);
 
-    await this.aerodromePositionModel.updateMany(
-      { walletLocator, 'walletRebalancingQueue.isRebalancing': true },
-      {
-        $unset: {
-          walletRebalancingQueue: 1,
+      // Update all positions for this wallet to remove rebalancing state
+      const result = await this.aerodromePositionModel.updateMany(
+        { walletLocator },
+        {
+          $unset: { walletRebalancingQueue: 1 },
         },
-      },
-    );
+      );
+
+      console.log(
+        `Cleared rebalancing state for ${result.modifiedCount} positions`,
+      );
+
+      return {
+        success: true,
+        message: `Cleared rebalancing state for ${result.modifiedCount} positions`,
+        modifiedCount: result.modifiedCount,
+      };
+    } catch (error) {
+      console.error('Error clearing wallet rebalancing state:', error);
+      throw new HttpException('Failed to clear wallet rebalancing state', 500);
+    }
+  }
+
+  async deleteJunkPositions() {
+    try {
+      console.log('=== Deleting Junk Positions ===');
+
+      // Find all positions with junk statuses
+      const junkPositions = await this.aerodromePositionModel.find({
+        status: {
+          $in: [
+            'retry_failed',
+            'retry_completed',
+            'cleanup_completed',
+            'cleaning_up',
+          ],
+        },
+      });
+
+      console.log(`Found ${junkPositions.length} junk positions to delete`);
+
+      if (junkPositions.length === 0) {
+        return {
+          success: true,
+          message: 'No junk positions found to delete',
+          deletedCount: 0,
+          positions: [],
+        };
+      }
+
+      // Delete all junk positions
+      const deleteResult = await this.aerodromePositionModel.deleteMany({
+        status: {
+          $in: [
+            'retry_failed',
+            'retry_completed',
+            'cleanup_completed',
+            'cleaning_up',
+          ],
+        },
+      });
+
+      console.log(
+        `Successfully deleted ${deleteResult.deletedCount} junk positions`,
+      );
+
+      return {
+        success: true,
+        message: `Successfully deleted ${deleteResult.deletedCount} junk positions`,
+        deletedCount: deleteResult.deletedCount,
+        positions: junkPositions.map((pos) => ({
+          positionId: pos.positionId,
+          walletLocator: pos.walletLocator,
+          pool: pos.pool,
+          status: pos.status,
+        })),
+      };
+    } catch (error) {
+      console.error('Error deleting junk positions:', error);
+      throw new HttpException('Failed to delete junk positions', 500);
+    }
   }
 
   /**

@@ -43,4 +43,6 @@ export class CreateAerodromeLpDto {
   @IsOptional()
   @IsString()
   positionId?: string; // Position ID for retry operations to get stored token amounts
+
+  strategyName?: string; // Optional, e.g., 'fee-optimiser'
 }
