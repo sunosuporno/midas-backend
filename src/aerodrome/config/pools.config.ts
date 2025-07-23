@@ -10,6 +10,7 @@ export interface PoolConfig {
   fee?: number; // Fee in pips (parts per million), e.g., 500 for 0.05%
   tickSpacing: number; // Tick spacing for the pool
   description?: string;
+  subgraphUrl?: string; // Subgraph URL for this pool
 }
 
 export const AERODROME_POOLS: Record<string, PoolConfig> = {
@@ -38,6 +39,8 @@ export const AERODROME_POOLS: Record<string, PoolConfig> = {
     fee: 436, // 436 pips (0.0436%) fee
     tickSpacing: 100, // WETH-USDC pool has tick spacing of 100
     description: 'Wrapped Ethereum to USDC liquidity pool',
+    subgraphUrl:
+      'https://gateway.thegraph.com/api/subgraphs/id/7zcFovqfFuJQU5ygitcnKjpU95YCEuXyKCBSnZrtSu4J',
   },
   // Add more pools as needed
 };

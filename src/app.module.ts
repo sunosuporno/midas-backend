@@ -12,14 +12,20 @@ import { ApiKey, ApiKeySchema } from './schemas/api-key.schema';
 import { AerodromeRebalancingCronService } from './aerodrome-rebalancing-cron.service';
 import { AerodromePositionTrackingCronService } from './aerodrome-position-tracking-cron.service';
 import { AerodromeFeeOptimiserRebalancingCronService } from './aerodrome-fee-optimiser-rebalancing-cron.service';
+import { AerodromeVolumeBlockCronService } from './aerodrome-volume-block-cron.service';
 import { User, UserSchema } from './schemas/user.schema';
 import { PendingTip, PendingTipSchema } from './schemas/pending-tip.schema';
 import { AerodromeController } from './aerodrome/aerodrome.controller';
 import { AerodromeService } from './aerodrome/aerodrome.service';
+import { AerodromeSubgraphService } from './aerodrome/subgraph.service';
 import {
   AerodromePosition,
   AerodromePositionSchema,
 } from './aerodrome/schemas/aerodrome-position.schema';
+import {
+  VolumeBlock,
+  VolumeBlockSchema,
+} from './aerodrome/schemas/volume-block.schema';
 
 @Module({
   imports: [
@@ -33,6 +39,7 @@ import {
       { name: User.name, schema: UserSchema },
       { name: PendingTip.name, schema: PendingTipSchema },
       { name: AerodromePosition.name, schema: AerodromePositionSchema },
+      { name: VolumeBlock.name, schema: VolumeBlockSchema },
     ]),
     JwtModule.register({
       global: true,
@@ -48,6 +55,8 @@ import {
     AerodromeRebalancingCronService,
     AerodromePositionTrackingCronService,
     AerodromeFeeOptimiserRebalancingCronService,
+    AerodromeVolumeBlockCronService,
+    AerodromeSubgraphService,
   ],
 })
 export class AppModule {}

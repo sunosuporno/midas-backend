@@ -200,7 +200,7 @@ export class AerodromeService {
     toTokenAddress: string,
     amount: string,
     fromAddress: string,
-    slippage: number = 1,
+    slippage: number = 0.3, // 0.3% default slippage
   ): Promise<OneInchSwapResponse> {
     console.log('Getting 1inch swap quote with parameters:', {
       fromTokenAddress,
@@ -327,7 +327,7 @@ export class AerodromeService {
     buyToken: string,
     sellAmount: string,
     walletAddress: string,
-    slippageBps: number = 100, // 1% default slippage
+    slippageBps: number = 30, // 0.3% default slippage
   ) {
     console.log('Getting 0x price with parameters:', {
       sellToken,
@@ -358,7 +358,7 @@ export class AerodromeService {
     buyToken: string,
     sellAmount: string,
     walletAddress: string,
-    slippageBps: number = 100,
+    slippageBps: number = 30, // 0.3% default slippage
   ) {
     console.log('Getting 0x quote with parameters:', {
       sellToken,
@@ -652,6 +652,7 @@ export class AerodromeService {
     let swapResults = null;
     let amount0Used = null;
     let amount1Used = null;
+    let mintResult: any = null;
 
     console.log('=== Creating Aerodrome LP Position ===');
     console.log('Wallet Locator:', createAerodromeLpDto.walletLocator);
@@ -807,27 +808,31 @@ export class AerodromeService {
         poolConfig.address,
         poolConfig.tickSpacing,
         percentDeviation,
+        createAerodromeLpDto.customTickLower,
+        createAerodromeLpDto.customTickUpper,
       );
 
       console.log('Calculated tick range for LP:', tickRange);
 
-      // Handle fee-optimiser strategy: calculate 3% tick range
-      let tickRange3 = null;
+      // Handle fee-optimiser strategy: calculate configurable rebalance tick range
+      let tickRangeRebalance = null;
 
       if (createAerodromeLpDto.strategyName === 'fee-optimiser') {
+        const rebalanceRange = createAerodromeLpDto.rebalanceRange || 3.0; // Default to 3% if not specified
         console.log(
-          '=== FEE-OPTIMISER STRATEGY: Calculating 3% tick range ===',
+          `=== FEE-OPTIMISER STRATEGY: Calculating ${rebalanceRange}% rebalance tick range ===`,
         );
 
-        // Calculate 3% tick range (0.5% is already in tickRange)
-        tickRange3 = await this.calculateTickRange(
+        // Calculate rebalance tick range (0.5% is already in tickRange)
+        tickRangeRebalance = await this.calculateTickRange(
           poolConfig.address,
           poolConfig.tickSpacing,
-          3.0,
+          rebalanceRange,
         );
 
         console.log('Fee-optimiser additional data:', {
-          tickRange3,
+          rebalanceRange,
+          tickRangeRebalance,
         });
       }
 
@@ -870,7 +875,8 @@ export class AerodromeService {
           },
           // Fee-optimiser specific data
           ...(createAerodromeLpDto.strategyName === 'fee-optimiser' && {
-            tickRange3,
+            rebalanceRange: createAerodromeLpDto.rebalanceRange || 3.0,
+            tickRangeRebalance,
           }),
           tokenAmounts: {
             token0Amount: tokenAmounts.token0Amount,
@@ -917,8 +923,8 @@ export class AerodromeService {
 
         console.log('USDC amount in base units:', usdcAmountInBaseUnits);
 
-        // Use fixed slippage of 1% (100 bps)
-        const slippageBps = 100;
+        // Use fixed slippage of 0.3% (30 bps)
+        const slippageBps = 30;
         console.log('Using slippage (bps):', slippageBps);
 
         // Step 1: Check if token0 needs USDC swap
@@ -1103,91 +1109,53 @@ export class AerodromeService {
         sqrtPriceX96: 0,
       };
 
-      // Call the mint function with retry logic for different slippage levels
-      let mintResult = null;
-      let finalSlippageUsed = 1.0; // Track which slippage was successful
-      const slippageLevels = [1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0]; // 1%, 1.5%, 2%, 2.5%, 3%, 3.5%, 4%, 4.5%, 5%
+      // Call the mint function with zero minimum amounts to avoid slippage issues
+      console.log(
+        'Attempting mint with zero minimum amounts to avoid slippage retries...',
+      );
 
-      for (const slippagePercent of slippageLevels) {
-        try {
-          console.log(`Attempting mint with ${slippagePercent}% slippage...`);
+      const mintParams = {
+        ...baseMintParams,
+        amount0Min: '0', // Set to 0 to accept any slippage
+        amount1Min: '0', // Set to 0 to accept any slippage
+      };
 
-          // Calculate minimum amounts based on slippage
-          // For 1% slippage: (100 - 1) / 100 = 0.99, so we want 99% of the amount
-          // For 2% slippage: (100 - 2) / 100 = 0.98, so we want 98% of the amount
-          const slippageMultiplier = (100 - slippagePercent) / 100;
-          // Use higher precision to avoid integer division issues
-          const amount0Min =
-            (amount0Used * BigInt(Math.floor(slippageMultiplier * 10000))) /
-            10000n;
-          const amount1Min =
-            (amount1Used * BigInt(Math.floor(slippageMultiplier * 10000))) /
-            10000n;
+      console.log('Mint params with zero minimums:', {
+        amount0Desired: amount0Used.toString(),
+        amount1Desired: amount1Used.toString(),
+        amount0Min: '0',
+        amount1Min: '0',
+        note: 'Accepting any slippage to avoid retries',
+      });
 
-          const mintParams = {
-            ...baseMintParams,
-            amount0Min: amount0Min.toString(),
-            amount1Min: amount1Min.toString(),
-          };
+      mintResult = await this.sendTransaction(
+        createAerodromeLpDto.walletLocator,
+        this.NON_FUNGIBLE_POSITION_MANAGER_ADDRESS,
+        NonFungiblePositionManagerAbi as unknown as any[],
+        'mint',
+        [mintParams],
+      );
 
-          console.log('Mint params with slippage:', {
-            amount0Desired: amount0Used.toString(),
-            amount1Desired: amount1Used.toString(),
-            amount0Min: amount0Min.toString(),
-            amount1Min: amount1Min.toString(),
-            slippagePercent,
-            slippageMultiplier,
-            slippageMultiplierTimes10000: Math.floor(
-              slippageMultiplier * 10000,
-            ),
-          });
+      // Check if the transaction actually succeeded
+      if (
+        mintResult.status === 'completed' ||
+        mintResult.status === 'success'
+      ) {
+        console.log('Mint successful with zero minimum amounts:', mintResult);
+      } else {
+        // Transaction was sent but failed on-chain
+        throw new Error(`Transaction failed with status: ${mintResult.status}`);
+      }
 
-          mintResult = await this.sendTransaction(
-            createAerodromeLpDto.walletLocator,
-            this.NON_FUNGIBLE_POSITION_MANAGER_ADDRESS,
-            NonFungiblePositionManagerAbi as unknown as any[],
-            'mint',
-            [mintParams],
-          );
-
-          // Check if the transaction actually succeeded
-          if (
-            mintResult.status === 'completed' ||
-            mintResult.status === 'success'
-          ) {
-            finalSlippageUsed = slippagePercent;
-            console.log(
-              `Mint successful with ${slippagePercent}% slippage:`,
-              mintResult,
-            );
-            break; // Success, exit the retry loop
-          } else {
-            // Transaction was sent but failed on-chain
-            throw new Error(
-              `Transaction failed with status: ${mintResult.status}`,
-            );
-          }
-        } catch (mintError) {
-          console.error(
-            `Mint failed with ${slippagePercent}% slippage:`,
-            mintError,
-          );
-
-          // If this is the last attempt (5.0%), handle mint failure
-          if (slippagePercent === 5.0) {
-            console.error('All mint attempts failed. Initiating cleanup...');
-
-            throw new HttpException(
-              'Mint failed due to high slippage. Position will be cleaned up and retried later.',
-              400,
-            );
-          }
-
-          // Continue to next slippage level
-          console.log(
-            `Retrying with ${slippageLevels[slippageLevels.indexOf(slippagePercent) + 1]}% slippage...`,
-          );
-        }
+      // Check if mint was successful before proceeding with post-mint processing
+      if (
+        !mintResult ||
+        (mintResult.status !== 'completed' && mintResult.status !== 'success')
+      ) {
+        throw new HttpException(
+          'Mint failed - no successful transaction result',
+          400,
+        );
       }
 
       // Option 1: Fetch transaction receipt and decode logs for mint details
@@ -1335,7 +1303,7 @@ export class AerodromeService {
                 BigInt(amount1Desired) - BigInt(actualAmount1)
               ).toString(),
             },
-            finalSlippageUsed: finalSlippageUsed,
+            finalSlippageUsed: 0, // No slippage tracking - using zero minimums to avoid retries
           },
         },
       );
@@ -1419,11 +1387,26 @@ export class AerodromeService {
               BigInt(amount1Desired) - BigInt(actualAmount1)
             ).toString(),
           },
-          finalSlippageUsed: finalSlippageUsed,
+          finalSlippageUsed: 0, // No slippage tracking - using zero minimums to avoid retries
         },
       };
     } catch (error) {
       console.error('Error in Aerodrome mint:', error);
+
+      // Check if this is a successful mint that encountered an error in post-processing
+      // If mintResult exists and has a successful status, don't trigger cleanup
+      if (
+        mintResult &&
+        (mintResult.status === 'completed' || mintResult.status === 'success')
+      ) {
+        console.log(
+          'Mint was successful but encountered error in post-processing. Not triggering cleanup.',
+        );
+        throw new HttpException(
+          error.message || 'Mint succeeded but post-processing failed',
+          error.status || 500,
+        );
+      }
 
       // Update position status to failed if we have a positionId
       if (positionId) {
@@ -1549,7 +1532,7 @@ export class AerodromeService {
     walletLocator: string,
     pool: string,
     usdcAmount: number,
-    slippageBps: number = 100,
+    slippageBps: number = 30, // 0.3% default slippage
   ) {
     try {
       console.log('=== Getting Swap Quote ===');
@@ -2074,11 +2057,14 @@ export class AerodromeService {
     poolAddress: string,
     tickSpacing: number,
     percentDeviation: number,
+    customTickLower?: number,
+    customTickUpper?: number,
   ): Promise<TickRange> {
     console.log('=== Calculating Tick Range ===');
     console.log('Pool Address:', poolAddress);
     console.log('Tick Spacing:', tickSpacing);
     console.log('Percent Deviation:', percentDeviation);
+    console.log('Custom Ticks:', { customTickLower, customTickUpper });
 
     // Constants for tick math
     const LOG_BASE = Math.log(1.0001);
@@ -2115,28 +2101,51 @@ export class AerodromeService {
         currentPrice,
       });
 
-      // 2. Calculate lower and upper price bounds for ±N%
-      const percent = percentDeviation / 100;
-      const lowerPrice = currentPrice * (1 - percent);
-      const upperPrice = currentPrice * (1 + percent);
+      let tickLower: number;
+      let tickUpper: number;
+      let lowerPrice: number;
+      let upperPrice: number;
 
-      console.log('Price bounds:', {
-        lowerPrice,
-        upperPrice,
-        percentDeviation: `${percentDeviation}%`,
-      });
+      // Check if we have custom tick range (for optimal rebalancing)
+      if (customTickLower !== undefined && customTickUpper !== undefined) {
+        console.log('Using custom tick range for optimal rebalancing');
+        tickLower = customTickLower;
+        tickUpper = customTickUpper;
 
-      // 3. Convert price bounds to ticks
-      const tickLowerRaw = Math.floor(Math.log(lowerPrice) / LOG_BASE);
-      const tickUpperRaw = Math.floor(Math.log(upperPrice) / LOG_BASE);
+        // Calculate corresponding prices for the custom ticks
+        lowerPrice = Math.exp(tickLower * LOG_BASE);
+        upperPrice = Math.exp(tickUpper * LOG_BASE);
 
-      // 4. Round ticks to the nearest valid tick based on tick spacing
-      const tickLower = Math.round(tickLowerRaw / tickSpacing) * tickSpacing;
-      const tickUpper = Math.round(tickUpperRaw / tickSpacing) * tickSpacing;
+        console.log('Custom tick range:', {
+          tickLower,
+          tickUpper,
+          lowerPrice,
+          upperPrice,
+        });
+      } else {
+        // 2. Calculate lower and upper price bounds for ±N%
+        const percent = percentDeviation / 100;
+        lowerPrice = currentPrice * (1 - percent);
+        upperPrice = currentPrice * (1 + percent);
+
+        console.log('Price bounds:', {
+          lowerPrice,
+          upperPrice,
+          percentDeviation: `${percentDeviation}%`,
+        });
+
+        // 3. Convert price bounds to ticks
+        const tickLowerRaw = Math.floor(Math.log(lowerPrice) / LOG_BASE);
+        const tickUpperRaw = Math.floor(Math.log(upperPrice) / LOG_BASE);
+
+        // 4. Round ticks to the nearest valid tick based on tick spacing
+        tickLower = Math.round(tickLowerRaw / tickSpacing) * tickSpacing;
+        tickUpper = Math.round(tickUpperRaw / tickSpacing) * tickSpacing;
+      }
 
       console.log('Raw calculated ticks:', {
-        tickLowerRaw,
-        tickUpperRaw,
+        tickLower,
+        tickUpper,
       });
 
       console.log('Rounded ticks (with spacing):', {
@@ -2649,7 +2658,7 @@ export class AerodromeService {
             : totalAvailableToken1;
         let usdcFromToken0 = 0;
         let usdcFromToken1 = 0;
-        const slippageBps = 100;
+        const slippageBps = 30; // 0.3% slippage
         if (poolConfig.token0 !== this.USDC_ADDRESS && swapAmountToken0 > 0n) {
           const { buyAmount } = await this.swapTokens(
             walletLocator,
@@ -3128,6 +3137,39 @@ export class AerodromeService {
       // Step 3: Mint new position with updated amount
       console.log('Step 3: Minting new position...');
 
+      // Check if we have optimal range data from fee-optimiser analysis
+      const optimalRebalanceRange = position.metadata?.optimalRebalanceRange;
+      let useOptimalRange = false;
+      let optimalTickLower = null;
+      let optimalTickUpper = null;
+
+      if (optimalRebalanceRange && reason === 'fee_optimiser') {
+        console.log(
+          'Found optimal rebalance range data:',
+          optimalRebalanceRange,
+        );
+
+        // Check if the optimal range analysis is recent (within last 4 hours)
+        const analysisTime = new Date(optimalRebalanceRange.analysisTimestamp);
+        const fourHoursAgo = new Date(Date.now() - 4 * 60 * 60 * 1000);
+
+        if (analysisTime > fourHoursAgo) {
+          useOptimalRange = true;
+          optimalTickLower = optimalRebalanceRange.tickLower;
+          optimalTickUpper = optimalRebalanceRange.tickUpper;
+
+          console.log('Using optimal range for rebalancing:', {
+            originalRange: `${position.metadata?.tickRange?.tickLower} to ${position.metadata?.tickRange?.tickUpper}`,
+            optimalRange: `${optimalTickLower} to ${optimalTickUpper}`,
+            volumeCaptureImprovement: `${optimalRebalanceRange.volumeCapturePercentage.toFixed(2)}%`,
+          });
+        } else {
+          console.log(
+            'Optimal range data is too old, using default range calculation',
+          );
+        }
+      }
+
       // Get percentDeviation from original position's tick range
       const originalPercentDeviation =
         position.metadata?.tickRange?.percentDeviation !== undefined
@@ -3169,6 +3211,9 @@ export class AerodromeService {
         );
       }
 
+      // Get rebalanceRange from original position for fee-optimiser strategy
+      const originalRebalanceRange = position.metadata?.rebalanceRange || 3.0;
+
       const newPositionDto = {
         walletLocator: position.walletLocator,
         pool: position.pool,
@@ -3176,8 +3221,14 @@ export class AerodromeService {
         description: `Rebalanced position (${reason}) - Original: ${originalUsdcAmount} USDC, New total: ${newUsdcAmount} USDC`,
         rebalancedPositionId: positionId, // Pass the original position ID being rebalanced
         percentDeviation: originalPercentDeviation, // Pass the original percentDeviation
+        rebalanceRange: originalRebalanceRange, // Pass the original rebalanceRange for fee-optimiser
         isRebalanceOrRetry: true, // Add flag for rebalancing flow
         positionId: positionId, // Pass the position ID to get stored token amounts
+        // Add optimal range data if available
+        ...(useOptimalRange && {
+          customTickLower: optimalTickLower,
+          customTickUpper: optimalTickUpper,
+        }),
       };
 
       console.log('Rebalance newPositionDto with percentDeviation:', {
@@ -3289,7 +3340,7 @@ export class AerodromeService {
     sellToken: string,
     buyToken: string,
     sellAmountRaw: string,
-    slippageBps: number = 100,
+    slippageBps: number = 30, // 0.3% default slippage
   ): Promise<{ buyAmount: string; txResult: any }> {
     const walletAddress = this.getWalletAddressFromLocator(walletLocator);
     const slippagePercent = slippageBps / 100; // Convert bps to percentage
@@ -4228,11 +4279,29 @@ export class AerodromeService {
         throw new Error(`Position ${positionId} not found`);
       }
 
+      // Check if position is already active (successful)
+      if (position.status === 'active') {
+        console.log(
+          `Position ${positionId} is already active (status: ${position.status}), skipping cleanup`,
+        );
+        return {
+          success: true,
+          positionId,
+          retrySuccessful: false,
+          message: `Position already ${position.status}`,
+        };
+      }
+
       if (position.status !== 'mint_failed') {
         console.log(
-          `Position ${positionId} is not in mint_failed status, skipping cleanup`,
+          `Position ${positionId} is not in mint_failed status (current: ${position.status}), skipping cleanup`,
         );
-        return;
+        return {
+          success: true,
+          positionId,
+          retrySuccessful: false,
+          message: `Position status is ${position.status}, not mint_failed`,
+        };
       }
 
       const poolConfig = getPoolConfig(position.pool);

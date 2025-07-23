@@ -45,4 +45,18 @@ export class CreateAerodromeLpDto {
   positionId?: string; // Position ID for retry operations to get stored token amounts
 
   strategyName?: string; // Optional, e.g., 'fee-optimiser'
+
+  @IsOptional()
+  @IsNumber()
+  @Min(0.5)
+  @Max(10)
+  rebalanceRange?: number; // Optional rebalance range for fee-optimiser strategy (default: 3.0)
+
+  @IsOptional()
+  @IsNumber()
+  customTickLower?: number; // Optional custom tick lower for optimal rebalancing
+
+  @IsOptional()
+  @IsNumber()
+  customTickUpper?: number; // Optional custom tick upper for optimal rebalancing
 }

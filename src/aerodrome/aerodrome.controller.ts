@@ -14,6 +14,7 @@ import { Public } from '../decorators/public.decorator';
 import { AerodromePositionTrackingCronService } from '../aerodrome-position-tracking-cron.service';
 import { AerodromeRebalancingCronService } from '../aerodrome-rebalancing-cron.service';
 import { AerodromeFeeOptimiserRebalancingCronService } from '../aerodrome-fee-optimiser-rebalancing-cron.service';
+import { AerodromeVolumeBlockCronService } from '../aerodrome-volume-block-cron.service';
 
 @Controller('aerodrome')
 export class AerodromeController {
@@ -22,6 +23,7 @@ export class AerodromeController {
     private readonly positionTrackingCronService: AerodromePositionTrackingCronService,
     private readonly rebalancingCronService: AerodromeRebalancingCronService,
     private readonly feeOptimiserRebalancingCronService: AerodromeFeeOptimiserRebalancingCronService,
+    private readonly volumeBlockCronService: AerodromeVolumeBlockCronService,
   ) {}
 
   @Public()
@@ -65,7 +67,7 @@ export class AerodromeController {
       walletLocator,
       pool,
       amount,
-      100, // Fixed slippage of 1%
+      30, // Fixed slippage of 0.3%
     );
   }
 
@@ -152,10 +154,15 @@ export class AerodromeController {
     body: {
       positionId: string;
       reason: 'out_of_range' | 'dollar_fees' | 'imbalanced' | 'age_limit';
+      strategyName?: string;
     },
   ) {
-    const { positionId, reason } = body;
-    return this.aerodromeService.rebalancePosition(positionId, reason);
+    const { positionId, reason, strategyName } = body;
+    return this.aerodromeService.rebalancePosition(
+      positionId,
+      reason,
+      strategyName,
+    );
   }
 
   @Public()
@@ -210,5 +217,103 @@ export class AerodromeController {
   @Get('fee-optimiser-rebalancing/status')
   async getFeeOptimiserRebalancingStatus() {
     return this.feeOptimiserRebalancingCronService.getStatus();
+  }
+
+  @Public()
+  @Post('volume-blocks/trigger')
+  async triggerVolumeBlockCollection() {
+    return this.volumeBlockCronService.manualTriggerVolumeBlockCollection();
+  }
+
+  @Public()
+  @Get('volume-blocks/status')
+  async getVolumeBlockStatus() {
+    return this.volumeBlockCronService.getStatus();
+  }
+
+  @Public()
+  @Get('volume-blocks')
+  async getVolumeBlockData() {
+    return this.volumeBlockCronService.getVolumeBlockData();
+  }
+
+  @Public()
+  @Post('volume-blocks/clear')
+  async clearVolumeBlockData() {
+    return this.volumeBlockCronService.clearVolumeBlockData();
+  }
+
+  @Public()
+  @Get('volume-blocks/average/:period')
+  async getAverageVolumeForPeriod(
+    @Param('period') period: 'morning' | 'afternoon' | 'night',
+    @Query('days') days: string = '7',
+  ) {
+    const daysNum = parseInt(days, 10);
+    return {
+      poolAddress: 'weth-usdc',
+      period,
+      days: daysNum,
+      averageVolumes:
+        await this.volumeBlockCronService.getAverageVolumesForPeriod(
+          period,
+          daysNum,
+        ),
+    };
+  }
+
+  @Public()
+  @Get('test/fee-leak-detection')
+  async testFeeLeakDetection(
+    @Query('positionId') positionId?: string,
+    @Query('tickLower') tickLower?: string,
+    @Query('tickUpper') tickUpper?: string,
+    @Query('hours') hours: string = '2',
+  ) {
+    const hoursCount = parseInt(hours, 10);
+
+    if (positionId) {
+      // Test with a specific position
+      return this.feeOptimiserRebalancingCronService.testVolumeCaptureForPosition(
+        positionId,
+        hoursCount,
+      );
+    } else if (tickLower && tickUpper) {
+      // Test with custom tick range
+      const lower = parseInt(tickLower, 10);
+      const upper = parseInt(tickUpper, 10);
+      return this.feeOptimiserRebalancingCronService.testVolumeCaptureForRange(
+        lower,
+        upper,
+        hoursCount,
+      );
+    } else {
+      // Test with current pool state
+      return this.feeOptimiserRebalancingCronService.testCurrentPoolVolumeCapture(
+        hoursCount,
+      );
+    }
+  }
+
+  @Public()
+  @Get('test/optimal-range-detection')
+  async testOptimalRangeDetection(
+    @Query('rangeWidth') rangeWidth: string,
+    @Query('hours') hours: string = '2',
+    @Query('testVolatilityThreshold') testVolatilityThreshold?: string,
+  ) {
+    const rangeWidthNum = parseInt(rangeWidth, 10);
+    const hoursCount = parseInt(hours, 10);
+    const shouldTestVolatility = testVolatilityThreshold === 'true';
+
+    if (isNaN(rangeWidthNum) || rangeWidthNum <= 0) {
+      throw new Error('Invalid range width. Must be a positive number.');
+    }
+
+    return this.feeOptimiserRebalancingCronService.testOptimalRangeDetection(
+      rangeWidthNum,
+      hoursCount,
+      shouldTestVolatility,
+    );
   }
 }
