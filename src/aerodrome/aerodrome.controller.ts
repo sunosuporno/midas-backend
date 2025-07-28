@@ -301,6 +301,7 @@ export class AerodromeController {
     @Query('rangeWidth') rangeWidth: string,
     @Query('hours') hours: string = '2',
     @Query('testVolatilityThreshold') testVolatilityThreshold?: string,
+    @Query('poolName') poolName: string = 'weth-usdc',
   ) {
     const rangeWidthNum = parseInt(rangeWidth, 10);
     const hoursCount = parseInt(hours, 10);
@@ -314,6 +315,25 @@ export class AerodromeController {
       rangeWidthNum,
       hoursCount,
       shouldTestVolatility,
+      poolName,
+    );
+  }
+
+  @Public()
+  @Get('test/positions-updated-last-6h40m')
+  async getPositionsUpdatedInLast6h40m() {
+    return this.aerodromeService.getPositionsUpdatedInLast6h40m();
+  }
+
+  @Public()
+  @Get('compare-positions/:positionId1/:positionId2')
+  async comparePositionsForValueLoss(
+    @Param('positionId1') positionId1: string,
+    @Param('positionId2') positionId2: string,
+  ) {
+    return this.aerodromeService.comparePositionsForValueLoss(
+      positionId1,
+      positionId2,
     );
   }
 }

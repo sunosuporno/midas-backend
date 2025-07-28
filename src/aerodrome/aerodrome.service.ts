@@ -659,6 +659,20 @@ export class AerodromeService {
     console.log('USDC Amount:', createAerodromeLpDto.usdcAmount);
     console.log('Pool:', createAerodromeLpDto.pool);
 
+    // Prevent mint calls with 0 USDC amount
+    if (
+      !createAerodromeLpDto.usdcAmount ||
+      createAerodromeLpDto.usdcAmount <= 0
+    ) {
+      console.error('❌ Invalid USDC amount:', createAerodromeLpDto.usdcAmount);
+      return {
+        success: false,
+        error: 'USDC amount must be greater than 0',
+        errorCode: 'INVALID_USDC_AMOUNT',
+        positionId: null,
+      };
+    }
+
     // Get wallet address from wallet locator
     const walletAddress = this.getWalletAddressFromLocator(
       createAerodromeLpDto.walletLocator,
@@ -1109,23 +1123,32 @@ export class AerodromeService {
         sqrtPriceX96: 0,
       };
 
-      // Call the mint function with zero minimum amounts to avoid slippage issues
-      console.log(
-        'Attempting mint with zero minimum amounts to avoid slippage retries...',
-      );
+      // Calculate minimum amounts with 10% slippage tolerance
+      const slippageTolerance = 0.1; // 10% slippage tolerance
+      const amount0Min =
+        (BigInt(amount0Used) *
+          BigInt(Math.floor((1 - slippageTolerance) * 1000))) /
+        BigInt(1000);
+      const amount1Min =
+        (BigInt(amount1Used) *
+          BigInt(Math.floor((1 - slippageTolerance) * 1000))) /
+        BigInt(1000);
+
+      console.log('Attempting mint with 10% slippage tolerance...');
 
       const mintParams = {
         ...baseMintParams,
-        amount0Min: '0', // Set to 0 to accept any slippage
-        amount1Min: '0', // Set to 0 to accept any slippage
+        amount0Min: amount0Min.toString(),
+        amount1Min: amount1Min.toString(),
       };
 
-      console.log('Mint params with zero minimums:', {
+      console.log('Mint params with 10% slippage tolerance:', {
         amount0Desired: amount0Used.toString(),
         amount1Desired: amount1Used.toString(),
-        amount0Min: '0',
-        amount1Min: '0',
-        note: 'Accepting any slippage to avoid retries',
+        amount0Min: amount0Min.toString(),
+        amount1Min: amount1Min.toString(),
+        slippageTolerance: '10%',
+        note: 'Protecting against excessive slippage while allowing reasonable market movement',
       });
 
       mintResult = await this.sendTransaction(
@@ -1141,7 +1164,7 @@ export class AerodromeService {
         mintResult.status === 'completed' ||
         mintResult.status === 'success'
       ) {
-        console.log('Mint successful with zero minimum amounts:', mintResult);
+        console.log('Mint successful with 10% slippage tolerance:', mintResult);
       } else {
         // Transaction was sent but failed on-chain
         throw new Error(`Transaction failed with status: ${mintResult.status}`);
@@ -1303,7 +1326,7 @@ export class AerodromeService {
                 BigInt(amount1Desired) - BigInt(actualAmount1)
               ).toString(),
             },
-            finalSlippageUsed: 0, // No slippage tracking - using zero minimums to avoid retries
+            finalSlippageUsed: 10, // 10% slippage tolerance used for minting
           },
         },
       );
@@ -1387,7 +1410,7 @@ export class AerodromeService {
               BigInt(amount1Desired) - BigInt(actualAmount1)
             ).toString(),
           },
-          finalSlippageUsed: 0, // No slippage tracking - using zero minimums to avoid retries
+          finalSlippageUsed: 10, // 10% slippage tolerance used for minting
         },
       };
     } catch (error) {
@@ -2401,6 +2424,22 @@ export class AerodromeService {
       const prevCollected0 = BigInt(prevCollectedFees.token0 || '0');
       const prevCollected1 = BigInt(prevCollectedFees.token1 || '0');
 
+      console.log('=== BURN FUNCTION: Initial State Analysis ===');
+      console.log('Token ID:', tokenId);
+      console.log('Wallet Locator:', walletLocator);
+      console.log('Is Rebalance:', isRebalance);
+      console.log('Pool:', position.pool);
+      console.log('Previous Collected Fees:', {
+        token0: prevCollected0.toString(),
+        token1: prevCollected1.toString(),
+        token0Human: (
+          Number(prevCollected0) / Math.pow(10, poolConfig.token0Decimals)
+        ).toFixed(6),
+        token1Human: (
+          Number(prevCollected1) / Math.pow(10, poolConfig.token1Decimals)
+        ).toFixed(6),
+      });
+
       // Get current liquidity on-chain
       const onChainPositionRaw = await this.readContract(
         this.NON_FUNGIBLE_POSITION_MANAGER_ADDRESS,
@@ -2415,6 +2454,10 @@ export class AerodromeService {
         data: onChainPositionRaw,
       });
       const liquidity = BigInt(decoded[7]);
+
+      console.log('=== BURN FUNCTION: Liquidity Check ===');
+      console.log('On-chain Liquidity:', liquidity.toString());
+      console.log('Liquidity is zero:', liquidity === 0n);
 
       if (!liquidity || liquidity === 0n) {
         // If liquidity is already 0, just burn the NFT
@@ -2449,6 +2492,9 @@ export class AerodromeService {
       }
 
       // 2. Remove all liquidity
+      console.log('=== BURN FUNCTION: Removing Liquidity ===');
+      console.log('Decreasing liquidity by:', liquidity.toString());
+
       const decreaseParams = {
         tokenId: BigInt(tokenId),
         liquidity: BigInt(liquidity),
@@ -2456,6 +2502,12 @@ export class AerodromeService {
         amount1Min: 0,
         deadline: Math.floor(Date.now() / 1000) + 1800,
       };
+      console.log('Decrease params:', {
+        tokenId: decreaseParams.tokenId.toString(),
+        liquidity: decreaseParams.liquidity.toString(),
+        deadline: new Date(decreaseParams.deadline * 1000).toISOString(),
+      });
+
       const decreaseResult = await this.sendTransaction(
         walletLocator,
         this.NON_FUNGIBLE_POSITION_MANAGER_ADDRESS,
@@ -2465,6 +2517,11 @@ export class AerodromeService {
       );
 
       // 3. Get token0 and token1 balances before collecting fees
+      console.log('=== BURN FUNCTION: Pre-Collect Balance Check ===');
+      console.log('Wallet Address:', walletAddress);
+      console.log('Token0 Address:', poolConfig.token0);
+      console.log('Token1 Address:', poolConfig.token1);
+
       const token0BalanceBeforeRaw = await this.readContract(
         poolConfig.token0,
         ERC20_ABI as unknown as any[],
@@ -2480,30 +2537,67 @@ export class AerodromeService {
       const token0BalanceBefore = BigInt(token0BalanceBeforeRaw);
       const token1BalanceBefore = BigInt(token1BalanceBeforeRaw);
 
+      console.log('Balances before collect:', {
+        token0: {
+          raw: token0BalanceBefore.toString(),
+          human: (
+            Number(token0BalanceBefore) /
+            Math.pow(10, poolConfig.token0Decimals)
+          ).toFixed(6),
+        },
+        token1: {
+          raw: token1BalanceBefore.toString(),
+          human: (
+            Number(token1BalanceBefore) /
+            Math.pow(10, poolConfig.token1Decimals)
+          ).toFixed(6),
+        },
+      });
+
       // 4. Collect fees
+      console.log('=== BURN FUNCTION: Collecting Fees ===');
+      console.log('Calling collectFees with skipAprCalculation: true');
+
       const collectFeesResult = await this.collectFees(
         walletLocator,
         tokenId,
         true,
       );
 
-      // 5. Get token0 and token1 balances after collect
-      const token0BalanceAfterRaw = await this.readContract(
-        poolConfig.token0,
-        ERC20_ABI as unknown as any[],
-        'balanceOf',
-        [walletAddress],
-      );
-      const token1BalanceAfterRaw = await this.readContract(
-        poolConfig.token1,
-        ERC20_ABI as unknown as any[],
-        'balanceOf',
-        [walletAddress],
-      );
-      const token0BalanceAfter = BigInt(token0BalanceAfterRaw);
-      const token1BalanceAfter = BigInt(token1BalanceAfterRaw);
+      console.log('Collect fees result:', {
+        transactionHash: collectFeesResult?.transactionHash,
+        success: !!collectFeesResult?.transactionHash,
+        collectedAmounts: collectFeesResult?.collected,
+      });
 
-      // 6. Burn the NFT
+      // Get the exact amounts from the Collect event
+      const collectedFromEvent = collectFeesResult?.collected || {
+        token0: '0',
+        token1: '0',
+      };
+      const collectedToken0 = BigInt(collectedFromEvent.token0);
+      const collectedToken1 = BigInt(collectedFromEvent.token1);
+
+      console.log('=== BURN FUNCTION: Collect Event Analysis ===');
+      console.log('Amounts from Collect event:', {
+        token0: {
+          raw: collectedToken0.toString(),
+          human: (
+            Number(collectedToken0) / Math.pow(10, poolConfig.token0Decimals)
+          ).toFixed(6),
+        },
+        token1: {
+          raw: collectedToken1.toString(),
+          human: (
+            Number(collectedToken1) / Math.pow(10, poolConfig.token1Decimals)
+          ).toFixed(6),
+        },
+      });
+
+      // 5. Burn the NFT
+      console.log('=== BURN FUNCTION: Burning NFT ===');
+      console.log('Burning NFT with tokenId:', tokenId);
+
       const burnResult = await this.sendTransaction(
         walletLocator,
         this.NON_FUNGIBLE_POSITION_MANAGER_ADDRESS,
@@ -2512,11 +2606,23 @@ export class AerodromeService {
         [tokenId],
       );
 
-      // 7. Calculate total received
-      const receivedToken0 =
-        prevCollected0 + (token0BalanceAfter - token0BalanceBefore);
-      const receivedToken1 =
-        prevCollected1 + (token1BalanceAfter - token1BalanceBefore);
+      console.log('Burn result:', {
+        transactionHash: burnResult?.transactionHash,
+        success: !!burnResult?.transactionHash,
+      });
+
+      // 7. Calculate total available funds using exact amounts from Collect event
+      console.log('=== BURN FUNCTION: Fund Calculation Analysis ===');
+
+      // === ACCOUNTING BREAKDOWN ===
+      // 1. Withdrawn amount (from collect function): actualReceivedToken0/1
+      // 2. Unused amount (from metadata.mintDetails): amount0Unused/amount1Unused
+      // 3. Previous fees collected (from collectedFees): prevCollected0/prevCollected1
+      // Total Available = Previous Collected Fees + Current Collect + Unused Amounts
+
+      // Use the exact amounts from the Collect event (no balance checks needed)
+      const actualReceivedToken0 = collectedToken0;
+      const actualReceivedToken1 = collectedToken1;
 
       // Add unused amounts from previous mint (if any)
       const prevMintDetails = position.metadata?.mintDetails;
@@ -2527,26 +2633,175 @@ export class AerodromeService {
         ? BigInt(prevMintDetails.amount1Unused)
         : 0n;
 
-      const totalAvailableToken0 = receivedToken0 + amount0Unused;
-      const totalAvailableToken1 = receivedToken1 + amount1Unused;
-      console.log(
-        'Total available after burn (including unused from previous mint):',
-        {
-          totalAvailableToken0: totalAvailableToken0.toString(),
-          totalAvailableToken1: totalAvailableToken1.toString(),
-          receivedToken0: receivedToken0.toString(),
-          receivedToken1: receivedToken1.toString(),
-          amount0Unused: amount0Unused.toString(),
-          amount1Unused: amount1Unused.toString(),
+      // Calculate total available: previous collected fees + actual received from collect + unused amounts
+      let totalAvailableToken0;
+      let totalAvailableToken1;
+
+      // Check if balance before liquidation includes previous collected fees and unused amounts
+      if (token0BalanceBefore > prevCollected0 + amount0Unused) {
+        totalAvailableToken0 =
+          prevCollected0 + actualReceivedToken0 + amount0Unused;
+      } else {
+        totalAvailableToken0 = actualReceivedToken0 + token0BalanceBefore;
+      }
+
+      if (token1BalanceBefore > prevCollected1 + amount1Unused) {
+        totalAvailableToken1 =
+          prevCollected1 + actualReceivedToken1 + amount1Unused;
+      } else {
+        totalAvailableToken1 = actualReceivedToken1 + token1BalanceBefore;
+      }
+
+      console.log('Fund calculation breakdown:', {
+        balanceCheck: {
+          token0: {
+            balanceBefore: {
+              raw: token0BalanceBefore.toString(),
+              human: (
+                Number(token0BalanceBefore) /
+                Math.pow(10, poolConfig.token0Decimals)
+              ).toFixed(6),
+            },
+            expectedInBalance: {
+              raw: (prevCollected0 + amount0Unused).toString(),
+              human: (
+                Number(prevCollected0 + amount0Unused) /
+                Math.pow(10, poolConfig.token0Decimals)
+              ).toFixed(6),
+            },
+            balanceCheckPassed:
+              token0BalanceBefore > prevCollected0 + amount0Unused,
+          },
+          token1: {
+            balanceBefore: {
+              raw: token1BalanceBefore.toString(),
+              human: (
+                Number(token1BalanceBefore) /
+                Math.pow(10, poolConfig.token1Decimals)
+              ).toFixed(6),
+            },
+            expectedInBalance: {
+              raw: (prevCollected1 + amount1Unused).toString(),
+              human: (
+                Number(prevCollected1 + amount1Unused) /
+                Math.pow(10, poolConfig.token1Decimals)
+              ).toFixed(6),
+            },
+            balanceCheckPassed:
+              token1BalanceBefore > prevCollected1 + amount1Unused,
+          },
         },
-      );
+        previousCollected: {
+          token0: {
+            raw: prevCollected0.toString(),
+            human: (
+              Number(prevCollected0) / Math.pow(10, poolConfig.token0Decimals)
+            ).toFixed(6),
+          },
+          token1: {
+            raw: prevCollected1.toString(),
+            human: (
+              Number(prevCollected1) / Math.pow(10, poolConfig.token1Decimals)
+            ).toFixed(6),
+          },
+        },
+        currentCollectReceived: {
+          token0: {
+            raw: actualReceivedToken0.toString(),
+            human: (
+              Number(actualReceivedToken0) /
+              Math.pow(10, poolConfig.token0Decimals)
+            ).toFixed(6),
+          },
+          token1: {
+            raw: actualReceivedToken1.toString(),
+            human: (
+              Number(actualReceivedToken1) /
+              Math.pow(10, poolConfig.token1Decimals)
+            ).toFixed(6),
+          },
+        },
+        unusedFromPreviousMint: {
+          token0: {
+            raw: amount0Unused.toString(),
+            human: (
+              Number(amount0Unused) / Math.pow(10, poolConfig.token0Decimals)
+            ).toFixed(6),
+          },
+          token1: {
+            raw: amount1Unused.toString(),
+            human: (
+              Number(amount1Unused) / Math.pow(10, poolConfig.token1Decimals)
+            ).toFixed(6),
+          },
+        },
+        totalAvailable: {
+          token0: {
+            raw: totalAvailableToken0.toString(),
+            human: (
+              Number(totalAvailableToken0) /
+              Math.pow(10, poolConfig.token0Decimals)
+            ).toFixed(6),
+            calculationMethod:
+              token0BalanceBefore > prevCollected0 + amount0Unused
+                ? 'standard (prevCollected + currentCollect + unused)'
+                : 'fallback (currentCollect + balanceBefore)',
+          },
+          token1: {
+            raw: totalAvailableToken1.toString(),
+            human: (
+              Number(totalAvailableToken1) /
+              Math.pow(10, poolConfig.token1Decimals)
+            ).toFixed(6),
+            calculationMethod:
+              token1BalanceBefore > prevCollected1 + amount1Unused
+                ? 'standard (prevCollected + currentCollect + unused)'
+                : 'fallback (currentCollect + balanceBefore)',
+          },
+        },
+      });
+      console.log('Total available after burn (with balance check logic):', {
+        totalAvailableToken0: totalAvailableToken0.toString(),
+        totalAvailableToken1: totalAvailableToken1.toString(),
+        collectReceivedToken0: actualReceivedToken0.toString(),
+        collectReceivedToken1: actualReceivedToken1.toString(),
+        amount0Unused: amount0Unused.toString(),
+        amount1Unused: amount1Unused.toString(),
+        balanceCheckResults: {
+          token0: {
+            balanceBefore: token0BalanceBefore.toString(),
+            expectedInBalance: (prevCollected0 + amount0Unused).toString(),
+            checkPassed: token0BalanceBefore > prevCollected0 + amount0Unused,
+          },
+          token1: {
+            balanceBefore: token1BalanceBefore.toString(),
+            expectedInBalance: (prevCollected1 + amount1Unused).toString(),
+            checkPassed: token1BalanceBefore > prevCollected1 + amount1Unused,
+          },
+        },
+      });
 
       // === Handle token amounts based on whether this is a rebalance or normal burn ===
-      const actualReceivedToken0 = token0BalanceAfter - token0BalanceBefore;
-      const actualReceivedToken1 = token1BalanceAfter - token1BalanceBefore;
 
       let withdrawAmountFinal = 0;
       let tokenAmountsForRebalance = null;
+
+      // Calculate detailed breakdown for better understanding
+      let withdrawAmountUSD = 0;
+      let feesCollectedUSD = 0;
+      let totalWithdrawnValueUSD = 0;
+      let liquidatedAmountUSD = 0;
+      let withdrawAmountTokens = { token0: '0', token1: '0' };
+      let feesCollectedTokens = { token0: '0', token1: '0' };
+
+      console.log('=== BURN FUNCTION: Mode Decision ===');
+      console.log('Burn mode:', isRebalance ? 'REBALANCE' : 'NORMAL');
+      console.log(
+        'Decision logic:',
+        isRebalance
+          ? 'Store token amounts for rebalancing'
+          : 'Swap tokens to USDC',
+      );
 
       if (isRebalance) {
         // For rebalance: Store token amounts instead of swapping to USDC
@@ -2554,29 +2809,32 @@ export class AerodromeService {
           '=== REBALANCE MODE: Storing token amounts instead of swapping ===',
         );
 
-        // Calculate the amounts to use for rebalancing based on your logic:
-        // 1. If balance > totalAvailable, use totalAvailable
-        // 2. If balance <= totalAvailable, use actualReceived
-        // 3. If actualReceived > balance, use balance difference
-        const rebalanceToken0Amount =
-          token0BalanceAfter > totalAvailableToken0
-            ? totalAvailableToken0
-            : actualReceivedToken0 > token0BalanceAfter
-              ? token0BalanceAfter - token0BalanceBefore
-              : actualReceivedToken0;
+        // For rebalance: Use total available amounts (previous collected + current collect + unused)
+        const rebalanceToken0Amount = totalAvailableToken0;
+        const rebalanceToken1Amount = totalAvailableToken1;
 
-        const rebalanceToken1Amount =
-          token1BalanceAfter > totalAvailableToken1
-            ? totalAvailableToken1
-            : actualReceivedToken1 > token1BalanceAfter
-              ? token1BalanceAfter - token1BalanceBefore
-              : actualReceivedToken1;
+        console.log('=== REBALANCE MODE: Amount Calculation Logic ===');
+        console.log('Rebalance calculation inputs:', {
+          totalAvailableToken0: totalAvailableToken0.toString(),
+          actualReceivedToken0: actualReceivedToken0.toString(),
+          totalAvailableToken1: totalAvailableToken1.toString(),
+          actualReceivedToken1: actualReceivedToken1.toString(),
+        });
+
+        console.log('Rebalance amount calculation:', {
+          token0Logic: {
+            totalAvailable: totalAvailableToken0.toString(),
+            result: rebalanceToken0Amount.toString(),
+          },
+          token1Logic: {
+            totalAvailable: totalAvailableToken1.toString(),
+            result: rebalanceToken1Amount.toString(),
+          },
+        });
 
         console.log('Rebalance token amounts:', {
           rebalanceToken0Amount: rebalanceToken0Amount.toString(),
           rebalanceToken1Amount: rebalanceToken1Amount.toString(),
-          token0BalanceAfter: token0BalanceAfter.toString(),
-          token1BalanceAfter: token1BalanceAfter.toString(),
           totalAvailableToken0: totalAvailableToken0.toString(),
           totalAvailableToken1: totalAvailableToken1.toString(),
           actualReceivedToken0: actualReceivedToken0.toString(),
@@ -2628,6 +2886,88 @@ export class AerodromeService {
         const totalUSDValue = token0USDValue + token1USDValue;
         withdrawAmountFinal = totalUSDValue;
 
+        // Calculate detailed breakdown for rebalance mode
+        withdrawAmountUSD = totalUSDValue;
+        liquidatedAmountUSD = totalUSDValue;
+
+        // Calculate fees collected from the position (LP fees earned)
+        // Since collect call only returns principal, current collect has 0 fees
+        // Fees collected = Previous collected fees (from collectedFees) + Current collect fees (0)
+        let feesCollectedToken0USD = 0;
+        let feesCollectedToken1USD = 0;
+
+        // Calculate USD value of previous collected fees
+        if (poolConfig.token0 === this.USDC_ADDRESS) {
+          feesCollectedToken0USD =
+            Number(prevCollected0) / Math.pow(10, this.USDC_DECIMALS);
+        } else {
+          try {
+            const token0Price = await this.getTokenPrice(poolConfig.token0Name);
+            feesCollectedToken0USD =
+              (Number(prevCollected0) /
+                Math.pow(10, poolConfig.token0Decimals)) *
+              token0Price;
+          } catch (error) {
+            console.error(
+              `Failed to get price for ${poolConfig.token0Name}:`,
+              error,
+            );
+            feesCollectedToken0USD = 0;
+          }
+        }
+
+        if (poolConfig.token1 === this.USDC_ADDRESS) {
+          feesCollectedToken1USD =
+            Number(prevCollected1) / Math.pow(10, this.USDC_DECIMALS);
+        } else {
+          try {
+            const token1Price = await this.getTokenPrice(poolConfig.token1Name);
+            feesCollectedToken1USD =
+              (Number(prevCollected1) /
+                Math.pow(10, poolConfig.token1Decimals)) *
+              token1Price;
+          } catch (error) {
+            console.error(
+              `Failed to get price for ${poolConfig.token1Name}:`,
+              error,
+            );
+            feesCollectedToken1USD = 0;
+          }
+        }
+
+        feesCollectedUSD = feesCollectedToken0USD + feesCollectedToken1USD;
+        totalWithdrawnValueUSD = totalUSDValue;
+
+        console.log('=== REBALANCE MODE: Fees Collected Analysis ===');
+        console.log('LP fees earned from position (previous collected fees):', {
+          token0: {
+            raw: prevCollected0.toString(),
+            human: (
+              Number(prevCollected0) / Math.pow(10, poolConfig.token0Decimals)
+            ).toFixed(6),
+            usdValue: feesCollectedToken0USD.toFixed(6),
+          },
+          token1: {
+            raw: prevCollected1.toString(),
+            human: (
+              Number(prevCollected1) / Math.pow(10, poolConfig.token1Decimals)
+            ).toFixed(6),
+            usdValue: feesCollectedToken1USD.toFixed(6),
+          },
+          totalUSD: feesCollectedUSD.toFixed(6),
+        });
+
+        // Withdraw amounts are the total amounts being withdrawn (principal + fees)
+        // Fees collected are just the LP fees earned (from previous collectedFees)
+        withdrawAmountTokens = {
+          token0: rebalanceToken0Amount.toString(),
+          token1: rebalanceToken1Amount.toString(),
+        };
+        feesCollectedTokens = {
+          token0: prevCollected0.toString(),
+          token1: prevCollected1.toString(),
+        };
+
         tokenAmountsForRebalance = {
           token0: rebalanceToken0Amount.toString(),
           token1: rebalanceToken1Amount.toString(),
@@ -2647,15 +2987,28 @@ export class AerodromeService {
         // Normal burn: Swap tokens to USDC
         console.log('=== NORMAL BURN MODE: Swapping tokens to USDC ===');
 
-        // Negation logic: if token0BalanceAfter <= receivedToken0, use actualReceivedToken0, else use receivedToken0
-        const swapAmountToken0 =
-          token0BalanceAfter <= totalAvailableToken0
-            ? actualReceivedToken0
-            : totalAvailableToken0;
-        const swapAmountToken1 =
-          token1BalanceAfter <= totalAvailableToken1
-            ? actualReceivedToken1
-            : totalAvailableToken1;
+        // For normal burn: Use total available amounts (previous collected + current collect + unused)
+        console.log('=== NORMAL BURN MODE: Swap Amount Calculation ===');
+        console.log('Swap calculation inputs:', {
+          totalAvailableToken0: totalAvailableToken0.toString(),
+          actualReceivedToken0: actualReceivedToken0.toString(),
+          totalAvailableToken1: totalAvailableToken1.toString(),
+          actualReceivedToken1: actualReceivedToken1.toString(),
+        });
+
+        const swapAmountToken0 = totalAvailableToken0;
+        const swapAmountToken1 = totalAvailableToken1;
+
+        console.log('Swap amount calculation:', {
+          token0Logic: {
+            totalAvailable: totalAvailableToken0.toString(),
+            result: swapAmountToken0.toString(),
+          },
+          token1Logic: {
+            totalAvailable: totalAvailableToken1.toString(),
+            result: swapAmountToken1.toString(),
+          },
+        });
         let usdcFromToken0 = 0;
         let usdcFromToken1 = 0;
         const slippageBps = 30; // 0.3% slippage
@@ -2687,10 +3040,147 @@ export class AerodromeService {
         }
         console.log('USDC from token0:', usdcFromToken0);
         console.log('USDC from token1:', usdcFromToken1);
+
+        // Calculate USD value of the liquidated amounts (collected from position)
+        let liquidatedAmountUSD = 0;
+        if (poolConfig.token0 === this.USDC_ADDRESS) {
+          liquidatedAmountUSD +=
+            Number(actualReceivedToken0) / Math.pow(10, this.USDC_DECIMALS);
+        } else {
+          try {
+            const token0Price = await this.getTokenPrice(poolConfig.token0Name);
+            liquidatedAmountUSD +=
+              (Number(actualReceivedToken0) /
+                Math.pow(10, poolConfig.token0Decimals)) *
+              token0Price;
+          } catch (error) {
+            console.error(
+              `Failed to get price for ${poolConfig.token0Name}:`,
+              error,
+            );
+          }
+        }
+
+        if (poolConfig.token1 === this.USDC_ADDRESS) {
+          liquidatedAmountUSD +=
+            Number(actualReceivedToken1) / Math.pow(10, this.USDC_DECIMALS);
+        } else {
+          try {
+            const token1Price = await this.getTokenPrice(poolConfig.token1Name);
+            liquidatedAmountUSD +=
+              (Number(actualReceivedToken1) /
+                Math.pow(10, poolConfig.token1Decimals)) *
+              token1Price;
+          } catch (error) {
+            console.error(
+              `Failed to get price for ${poolConfig.token1Name}:`,
+              error,
+            );
+          }
+        }
+
+        console.log('Liquidated amount in USD:', liquidatedAmountUSD);
         withdrawAmountFinal = usdcFromToken0 + usdcFromToken1;
+
+        // Calculate detailed breakdown for normal burn mode
+        withdrawAmountUSD = usdcFromToken0 + usdcFromToken1;
+
+        // Calculate fees collected from the position (LP fees earned)
+        // Since collect call only returns principal, current collect has 0 fees
+        // Fees collected = Previous collected fees (from collectedFees) + Current collect fees (0)
+        let feesCollectedToken0USD = 0;
+        let feesCollectedToken1USD = 0;
+
+        // Calculate USD value of previous collected fees
+        if (poolConfig.token0 === this.USDC_ADDRESS) {
+          feesCollectedToken0USD =
+            Number(prevCollected0) / Math.pow(10, this.USDC_DECIMALS);
+        } else {
+          try {
+            const token0Price = await this.getTokenPrice(poolConfig.token0Name);
+            feesCollectedToken0USD =
+              (Number(prevCollected0) /
+                Math.pow(10, poolConfig.token0Decimals)) *
+              token0Price;
+          } catch (error) {
+            console.error(
+              `Failed to get price for ${poolConfig.token0Name}:`,
+              error,
+            );
+            feesCollectedToken0USD = 0;
+          }
+        }
+
+        if (poolConfig.token1 === this.USDC_ADDRESS) {
+          feesCollectedToken1USD =
+            Number(prevCollected1) / Math.pow(10, this.USDC_DECIMALS);
+        } else {
+          try {
+            const token1Price = await this.getTokenPrice(poolConfig.token1Name);
+            feesCollectedToken1USD =
+              (Number(prevCollected1) /
+                Math.pow(10, poolConfig.token1Decimals)) *
+              token1Price;
+          } catch (error) {
+            console.error(
+              `Failed to get price for ${poolConfig.token1Name}:`,
+              error,
+            );
+            feesCollectedToken1USD = 0;
+          }
+        }
+
+        feesCollectedUSD = feesCollectedToken0USD + feesCollectedToken1USD;
+        totalWithdrawnValueUSD = withdrawAmountUSD;
+
+        console.log('=== NORMAL BURN MODE: Fees Collected Analysis ===');
+        console.log('LP fees earned from position (previous collected fees):', {
+          token0: {
+            raw: prevCollected0.toString(),
+            human: (
+              Number(prevCollected0) / Math.pow(10, poolConfig.token0Decimals)
+            ).toFixed(6),
+            usdValue: feesCollectedToken0USD.toFixed(6),
+          },
+          token1: {
+            raw: prevCollected1.toString(),
+            human: (
+              Number(prevCollected1) / Math.pow(10, poolConfig.token1Decimals)
+            ).toFixed(6),
+            usdValue: feesCollectedToken1USD.toFixed(6),
+          },
+          totalUSD: feesCollectedUSD.toFixed(6),
+        });
+
+        // Withdraw amounts are the total amounts being withdrawn (principal + fees)
+        // Fees collected are just the LP fees earned (from previous collectedFees)
+        withdrawAmountTokens = {
+          token0: swapAmountToken0.toString(),
+          token1: swapAmountToken1.toString(),
+        };
+        feesCollectedTokens = {
+          token0: prevCollected0.toString(),
+          token1: prevCollected1.toString(),
+        };
       }
 
       // 8. Update DB: mark position as closed/burned and store withdrawAmountFinal
+      console.log('=== BURN FUNCTION: Database Update ===');
+      console.log('Updating position status to "closed"');
+      console.log('Detailed amounts breakdown:', {
+        withdrawAmountUSD: withdrawAmountUSD.toFixed(6),
+        feesCollectedUSD: feesCollectedUSD.toFixed(6),
+        totalWithdrawnValueUSD: totalWithdrawnValueUSD.toFixed(6),
+        withdrawAmountTokens: withdrawAmountTokens,
+        feesCollectedTokens: feesCollectedTokens,
+        legacyWithdrawAmountFinal: withdrawAmountFinal.toFixed(6),
+      });
+      console.log('Transaction hashes:', {
+        decreaseLiquidity: decreaseResult?.transactionHash,
+        burn: burnResult?.transactionHash,
+        collectFees: collectFeesResult?.transactionHash,
+      });
+
       await this.aerodromePositionModel.findOneAndUpdate(
         { 'metadata.mintDetails.tokenId': tokenId.toString() },
         {
@@ -2703,10 +3193,41 @@ export class AerodromeService {
               collectFeesTx: collectFeesResult?.transactionHash,
               timestamp: new Date().toISOString(),
             },
-            withdrawAmountFinal,
+            withdrawAmountFinal, // Keep for backward compatibility
+            withdrawAmountUSD,
+            feesCollectedUSD,
+            totalWithdrawnValueUSD,
+            liquidatedAmountUSD,
+            withdrawAmountTokens,
+            feesCollectedTokens,
+            // === ACCOUNTING BREAKDOWN ===
+            accountingBreakdown: {
+              // 1. Withdrawn amount (from collect function)
+              withdrawnFromCollect: {
+                token0: actualReceivedToken0.toString(),
+                token1: actualReceivedToken1.toString(),
+              },
+              // 2. Unused amount (from metadata.mintDetails)
+              unusedFromMint: {
+                token0: amount0Unused.toString(),
+                token1: amount1Unused.toString(),
+              },
+              // 3. Previous fees collected (from collectedFees)
+              previousCollectedFees: {
+                token0: prevCollected0.toString(),
+                token1: prevCollected1.toString(),
+              },
+              // Total calculation
+              totalAvailable: {
+                token0: totalAvailableToken0.toString(),
+                token1: totalAvailableToken1.toString(),
+              },
+            },
           },
         },
       );
+
+      console.log('Database update completed successfully');
 
       // 9. Return result
       const result: any = {
@@ -2716,18 +3237,30 @@ export class AerodromeService {
         burnTx: burnResult?.transactionHash,
         collectFeesTx: collectFeesResult?.transactionHash,
         totalTokensReceived: {
-          token0: receivedToken0.toString(),
-          token1: receivedToken1.toString(),
+          token0: (
+            prevCollected0 +
+            actualReceivedToken0 +
+            amount0Unused
+          ).toString(),
+          token1: (
+            prevCollected1 +
+            actualReceivedToken1 +
+            amount1Unused
+          ).toString(),
         },
-        withdrawAmountFinal,
+        withdrawAmountFinal, // Keep for backward compatibility
+        detailedAmounts: {
+          withdrawAmountUSD,
+          feesCollectedUSD,
+          totalWithdrawnValueUSD,
+          liquidatedAmountUSD,
+          withdrawAmountTokens,
+          feesCollectedTokens,
+        },
         balances: {
           before: {
             token0: token0BalanceBefore.toString(),
             token1: token1BalanceBefore.toString(),
-          },
-          after: {
-            token0: token0BalanceAfter.toString(),
-            token1: token1BalanceAfter.toString(),
           },
         },
         prevCollectedFees: {
@@ -2741,6 +3274,31 @@ export class AerodromeService {
       if (isRebalance && tokenAmountsForRebalance) {
         result.tokenAmountsForRebalance = tokenAmountsForRebalance;
       }
+
+      console.log('=== BURN FUNCTION: Summary ===');
+      console.log('Burn operation completed successfully');
+      console.log('Mode:', isRebalance ? 'REBALANCE' : 'NORMAL');
+      console.log('Detailed amounts summary:', {
+        withdrawAmountUSD: withdrawAmountUSD.toFixed(6),
+        feesCollectedUSD: feesCollectedUSD.toFixed(6),
+        totalWithdrawnValueUSD: totalWithdrawnValueUSD.toFixed(6),
+        withdrawAmountTokens: withdrawAmountTokens,
+        feesCollectedTokens: feesCollectedTokens,
+        legacyWithdrawAmountFinal: withdrawAmountFinal.toFixed(6),
+      });
+      console.log('Total tokens received:', {
+        token0: (
+          prevCollected0 +
+          actualReceivedToken0 +
+          amount0Unused
+        ).toString(),
+        token1: (
+          prevCollected1 +
+          actualReceivedToken1 +
+          amount1Unused
+        ).toString(),
+      });
+      console.log('=== BURN FUNCTION: END ===');
 
       return result;
     } catch (error) {
@@ -2856,6 +3414,13 @@ export class AerodromeService {
 
       console.log('New cumulative amounts to save:', new0, new1);
 
+      // Check if actual fees were earned (either token0 or token1 increased)
+      const feesActuallyEarned = collected0 > 0n || collected1 > 0n;
+      console.log('Fees actually earned:', feesActuallyEarned, {
+        collected0: collected0.toString(),
+        collected1: collected1.toString(),
+      });
+
       // === APR CALCULATION ===
       let apr = 0;
       let totalFeesUSD = 0;
@@ -2965,6 +3530,19 @@ export class AerodromeService {
         updateData['collectedFees.apr'] = apr;
         updateData['collectedFees.lastAprUpdate'] = new Date().toISOString();
         updateData['collectedFees.totalFeesUSD'] = totalFeesUSD;
+      }
+
+      // Update lastActualEarning timestamp only if fees were actually earned
+      if (feesActuallyEarned) {
+        updateData['collectedFees.lastActualEarning'] =
+          new Date().toISOString();
+        console.log(
+          '✅ Updated lastActualEarning timestamp - fees were earned',
+        );
+      } else {
+        console.log(
+          '⏸️ No fees earned - keeping existing lastActualEarning timestamp',
+        );
       }
 
       await this.aerodromePositionModel.findOneAndUpdate(
@@ -5108,8 +5686,58 @@ export class AerodromeService {
       const token1DollarValue = amount1Human * token1Price;
       const totalCurrentDollarValue = token0DollarValue + token1DollarValue;
 
+      // Check if actualUsdcAmount already exists, if not calculate it
+      let actualUsdcAmount = position.actualUsdcAmount;
+
+      if (actualUsdcAmount === undefined || actualUsdcAmount === null) {
+        console.log(`Calculating actualUsdcAmount for position ${positionId}`);
+
+        const mintDetails = position.metadata?.mintDetails;
+        if (
+          mintDetails &&
+          mintDetails.token0PriceAtMint !== undefined &&
+          mintDetails.token1PriceAtMint !== undefined &&
+          mintDetails.amount0 !== undefined &&
+          mintDetails.amount1 !== undefined
+        ) {
+          // Convert raw amounts to human readable forms
+          const amount0Human =
+            Number(mintDetails.amount0) /
+            Math.pow(10, poolConfig.token0Decimals);
+          const amount1Human =
+            Number(mintDetails.amount1) /
+            Math.pow(10, poolConfig.token1Decimals);
+
+          // Calculate actual USDC amount invested
+          const token0Value =
+            amount0Human * Number(mintDetails.token0PriceAtMint);
+          const token1Value =
+            amount1Human * Number(mintDetails.token1PriceAtMint);
+          actualUsdcAmount = token0Value + token1Value;
+
+          console.log('Actual USDC amount calculation:', {
+            amount0Raw: mintDetails.amount0,
+            amount1Raw: mintDetails.amount1,
+            amount0Human: `${amount0Human.toFixed(6)} ${poolConfig.token0Name}`,
+            amount1Human: `${amount1Human.toFixed(6)} ${poolConfig.token1Name}`,
+            token0PriceAtMint: `$${mintDetails.token0PriceAtMint}`,
+            token1PriceAtMint: `$${mintDetails.token1PriceAtMint}`,
+            token0Value: `$${token0Value.toFixed(2)}`,
+            token1Value: `$${token1Value.toFixed(2)}`,
+            actualUsdcAmount: `$${actualUsdcAmount.toFixed(2)}`,
+            originalUsdcAmount: `$${position.usdcAmount}`,
+            slippageLoss: `$${(position.usdcAmount - actualUsdcAmount).toFixed(2)}`,
+          });
+        } else {
+          console.log(
+            `No mint details available for position ${positionId}, using original usdcAmount`,
+          );
+          actualUsdcAmount = position.usdcAmount;
+        }
+      }
+
       // Get original values for comparison
-      let originalUsdcAmount = position.usdcAmount;
+      let originalUsdcAmount = actualUsdcAmount; // Use actual amount as the baseline
       let originalToken0Value = null;
       let originalToken1Value = null;
       let originalToken0Amount = null;
@@ -5191,6 +5819,7 @@ export class AerodromeService {
         },
         originalValues: {
           usdcAmount: originalUsdcAmount,
+          actualUsdcAmount: actualUsdcAmount,
           token0Value: originalToken0Value,
           token1Value: originalToken1Value,
           token0Amount: originalToken0Amount,
@@ -5243,14 +5872,27 @@ export class AerodromeService {
         },
       };
 
-      // Update the position with the new details
+      // Update the position with the new details in a single operation
+      const updateData: any = {
+        $push: {
+          'metadata.positionHistory': detailsToSave,
+        },
+      };
+
+      // If we calculated actualUsdcAmount for the first time, save it
+      if (
+        actualUsdcAmount !== undefined &&
+        actualUsdcAmount !== position.actualUsdcAmount
+      ) {
+        updateData.$set = { actualUsdcAmount };
+        console.log(
+          `Saving actualUsdcAmount ${actualUsdcAmount} to position ${positionId}`,
+        );
+      }
+
       await this.aerodromePositionModel.findOneAndUpdate(
         { positionId },
-        {
-          $push: {
-            'metadata.positionHistory': detailsToSave,
-          },
-        },
+        updateData,
       );
 
       console.log('Position details saved to history:', {
@@ -5636,4 +6278,286 @@ export class AerodromeService {
   }
 
   // === REBALANCING LOGIC ===
+
+  /**
+   * Test endpoint to get all positions updated in the last 6 hours and 40 minutes
+   * Returns positions ordered from oldest updated to newest updated
+   */
+  async getPositionsUpdatedInLast6h40m(): Promise<{
+    success: boolean;
+    message: string;
+    count: number;
+    positions: any[];
+    timeRange: {
+      from: string;
+      to: string;
+      duration: string;
+    };
+  }> {
+    try {
+      console.log('=== GETTING POSITIONS UPDATED IN LAST 6h 40m ===');
+
+      // Calculate time range: 6 hours and 40 minutes ago from now
+      const now = new Date();
+      const sixHoursFortyMinutesAgo = new Date(
+        now.getTime() - (6 * 60 + 40) * 60 * 1000,
+      );
+
+      console.log('Time range:', {
+        from: sixHoursFortyMinutesAgo.toISOString(),
+        to: now.toISOString(),
+        duration: '6 hours 40 minutes',
+      });
+
+      // Query positions updated in the last 6 hours and 40 minutes
+      // Ordered by updatedAt ascending (oldest to newest)
+      const positions = await this.aerodromePositionModel
+        .find({
+          updatedAt: {
+            $gte: sixHoursFortyMinutesAgo,
+            $lte: now,
+          },
+        })
+        .sort({ updatedAt: 1 }) // 1 for ascending order (oldest first)
+        .lean(); // Use lean() for better performance since we're just reading
+
+      console.log(
+        `Found ${positions.length} positions updated in the last 6h 40m`,
+      );
+
+      // Log the first few positions for debugging
+      if (positions.length > 0) {
+        console.log('First 3 positions (oldest):');
+        positions.slice(0, 3).forEach((pos, index) => {
+          console.log(
+            `${index + 1}. Position ${pos.positionId} - Updated: ${(pos as any).updatedAt}`,
+          );
+        });
+
+        if (positions.length > 3) {
+          console.log('Last 3 positions (newest):');
+          positions.slice(-3).forEach((pos, index) => {
+            const actualIndex = positions.length - 3 + index;
+            console.log(
+              `${actualIndex + 1}. Position ${pos.positionId} - Updated: ${(pos as any).updatedAt}`,
+            );
+          });
+        }
+      }
+
+      return {
+        success: true,
+        message: `Successfully retrieved ${positions.length} positions updated in the last 6 hours and 40 minutes`,
+        count: positions.length,
+        positions: positions,
+        timeRange: {
+          from: sixHoursFortyMinutesAgo.toISOString(),
+          to: now.toISOString(),
+          duration: '6 hours 40 minutes',
+        },
+      };
+    } catch (error) {
+      console.error('Error getting positions updated in last 6h 40m:', error);
+      return {
+        success: false,
+        message: `Failed to get positions: ${error.message}`,
+        count: 0,
+        positions: [],
+        timeRange: {
+          from: '',
+          to: '',
+          duration: '6 hours 40 minutes',
+        },
+      };
+    }
+  }
+
+  async comparePositionsForValueLoss(
+    positionId1: string,
+    positionId2: string,
+  ): Promise<{
+    success: boolean;
+    message: string;
+    olderPosition: any;
+    newerPosition: any;
+    valueLoss: {
+      totalUSDValueLoss: number;
+      token0Loss: number;
+      token1Loss: number;
+      percentageLoss: number;
+    };
+    analysis: {
+      olderPositionUSDValue: number;
+      newerPositionUSDValue: number;
+      priceAdjustedValue: number;
+      actualValue: number;
+    };
+  }> {
+    try {
+      console.log(`=== COMPARING POSITIONS FOR VALUE LOSS ===`);
+      console.log(`Position 1: ${positionId1}`);
+      console.log(`Position 2: ${positionId2}`);
+
+      // Fetch both positions
+      const position1 = await this.aerodromePositionModel.findOne({
+        positionId: positionId1,
+      });
+      const position2 = await this.aerodromePositionModel.findOne({
+        positionId: positionId2,
+      });
+
+      if (!position1 || !position2) {
+        throw new Error('One or both positions not found');
+      }
+
+      // Determine which is older based on createdAt
+      const olderPosition =
+        (position1 as any).createdAt < (position2 as any).createdAt
+          ? position1
+          : position2;
+      const newerPosition =
+        (position1 as any).createdAt < (position2 as any).createdAt
+          ? position2
+          : position1;
+
+      console.log('Position analysis:', {
+        olderPositionId: olderPosition.positionId,
+        olderCreatedAt: (olderPosition as any).createdAt,
+        newerPositionId: newerPosition.positionId,
+        newerCreatedAt: (newerPosition as any).createdAt,
+      });
+
+      // Check if both positions have retryMetadata
+      if (
+        !olderPosition.metadata?.retryMetadata?.originalTokenAmounts ||
+        !newerPosition.metadata?.retryMetadata?.originalTokenAmounts
+      ) {
+        throw new Error(
+          'Both positions must have retryMetadata with originalTokenAmounts',
+        );
+      }
+
+      // Get pool config
+      const poolConfig = getPoolConfig(olderPosition.pool);
+      if (!poolConfig) {
+        throw new Error(`Pool config not found for ${olderPosition.pool}`);
+      }
+
+      // Get the prices from the newer position's mintDetails
+      const newerPositionPrices = newerPosition.metadata?.mintDetails;
+      if (!newerPositionPrices) {
+        throw new Error('Newer position does not have mintDetails with prices');
+      }
+
+      const token0PriceAtNewerMint = newerPositionPrices.token0PriceAtMint;
+      const token1PriceAtNewerMint = newerPositionPrices.token1PriceAtMint;
+
+      console.log('Prices from newer position mintDetails:', {
+        token0PriceAtNewerMint,
+        token1PriceAtNewerMint,
+      });
+
+      // Get older position's token amounts
+      const olderToken0Amount = BigInt(
+        olderPosition.metadata.retryMetadata.originalTokenAmounts.token0,
+      );
+      const olderToken1Amount = BigInt(
+        olderPosition.metadata.retryMetadata.originalTokenAmounts.token1,
+      );
+      const olderUSDValue =
+        olderPosition.metadata.retryMetadata.originalTokenAmounts.totalUSDValue;
+
+      // Get newer position's token amounts
+      const newerToken0Amount = BigInt(
+        newerPosition.metadata.retryMetadata.originalTokenAmounts.token0,
+      );
+      const newerToken1Amount = BigInt(
+        newerPosition.metadata.retryMetadata.originalTokenAmounts.token1,
+      );
+      const newerUSDValue =
+        newerPosition.metadata.retryMetadata.originalTokenAmounts.totalUSDValue;
+
+      // Calculate what the older amounts would be worth at the newer position's prices
+      const olderToken0ValueUSD =
+        (Number(olderToken0Amount) / Math.pow(10, poolConfig.token0Decimals)) *
+        token0PriceAtNewerMint;
+      const olderToken1ValueUSD =
+        (Number(olderToken1Amount) / Math.pow(10, poolConfig.token1Decimals)) *
+        token1PriceAtNewerMint;
+      const priceAdjustedValue = olderToken0ValueUSD + olderToken1ValueUSD;
+
+      // Calculate actual value of newer position
+      const actualValue = newerUSDValue;
+
+      // Calculate losses
+      const totalUSDValueLoss = priceAdjustedValue - actualValue;
+      const token0Loss =
+        Number(olderToken0Amount - newerToken0Amount) /
+        Math.pow(10, poolConfig.token0Decimals);
+      const token1Loss =
+        Number(olderToken1Amount - newerToken1Amount) /
+        Math.pow(10, poolConfig.token1Decimals);
+      const percentageLoss = (totalUSDValueLoss / priceAdjustedValue) * 100;
+
+      console.log('Value loss calculation:', {
+        olderToken0Amount: olderToken0Amount.toString(),
+        olderToken1Amount: olderToken1Amount.toString(),
+        newerToken0Amount: newerToken0Amount.toString(),
+        newerToken1Amount: newerToken1Amount.toString(),
+        priceAdjustedValue: priceAdjustedValue.toFixed(6),
+        actualValue: actualValue.toFixed(6),
+        totalUSDValueLoss: totalUSDValueLoss.toFixed(6),
+        percentageLoss: percentageLoss.toFixed(4),
+      });
+
+      return {
+        success: true,
+        message: 'Position comparison completed successfully',
+        olderPosition: {
+          positionId: olderPosition.positionId,
+          createdAt: (olderPosition as any).createdAt,
+          status: olderPosition.status,
+          pool: olderPosition.pool,
+        },
+        newerPosition: {
+          positionId: newerPosition.positionId,
+          createdAt: (newerPosition as any).createdAt,
+          status: newerPosition.status,
+          pool: newerPosition.pool,
+        },
+        valueLoss: {
+          totalUSDValueLoss: Number(totalUSDValueLoss.toFixed(6)),
+          token0Loss: Number(token0Loss.toFixed(8)),
+          token1Loss: Number(token1Loss.toFixed(6)),
+          percentageLoss: Number(percentageLoss.toFixed(4)),
+        },
+        analysis: {
+          olderPositionUSDValue: Number(olderUSDValue.toFixed(6)),
+          newerPositionUSDValue: Number(newerUSDValue.toFixed(6)),
+          priceAdjustedValue: Number(priceAdjustedValue.toFixed(6)),
+          actualValue: Number(actualValue.toFixed(6)),
+        },
+      };
+    } catch (error) {
+      console.error('Error comparing positions for value loss:', error);
+      return {
+        success: false,
+        message: `Error comparing positions: ${error.message}`,
+        olderPosition: null,
+        newerPosition: null,
+        valueLoss: {
+          totalUSDValueLoss: 0,
+          token0Loss: 0,
+          token1Loss: 0,
+          percentageLoss: 0,
+        },
+        analysis: {
+          olderPositionUSDValue: 0,
+          newerPositionUSDValue: 0,
+          priceAdjustedValue: 0,
+          actualValue: 0,
+        },
+      };
+    }
+  }
 }

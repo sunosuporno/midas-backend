@@ -79,6 +79,7 @@ export class AerodromePositionTrackingCronService implements OnModuleInit {
           results.processed++;
 
           // Call getPositionDetails which will automatically save the tracking data
+          // This will also calculate and store actualUsdcAmount if not already present
           const positionDetails =
             await this.aerodromeService.getPositionDetails(position.positionId);
 

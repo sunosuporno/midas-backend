@@ -27,6 +27,7 @@ import {
 import { poolAbi } from './aerodrome/abis/pool';
 import { AerodromeVolumeBlockCronService } from './aerodrome-volume-block-cron.service';
 import { AerodromeSubgraphService } from './aerodrome/subgraph.service';
+import { getPoolConfig } from './aerodrome/config/pools.config';
 
 @Injectable()
 export class AerodromeFeeOptimiserRebalancingCronService
@@ -136,6 +137,7 @@ export class AerodromeFeeOptimiserRebalancingCronService
         rebalanced: 0,
         skipped: 0,
         skippedDueToVolatility: 0,
+        skippedDueToPriceGap: 0,
         errors: [] as string[],
       };
 
@@ -191,8 +193,10 @@ export class AerodromeFeeOptimiserRebalancingCronService
               );
             }
           } else {
-            // Check if it was skipped due to volatility
+            // Check if it was skipped due to volatility or price gap
             const volatilityAnalysis = position.metadata?.volatilityAnalysis;
+            const priceGapAnalysis = position.metadata?.priceGapAnalysis;
+
             if (
               volatilityAnalysis &&
               volatilityAnalysis.reason === 'market_too_volatile'
@@ -200,6 +204,15 @@ export class AerodromeFeeOptimiserRebalancingCronService
               results.skippedDueToVolatility++;
               console.log(
                 `🌪️ Skipping position ${position.positionId} - market too volatile (${volatilityAnalysis.optimalRangeVolumeCapture.toFixed(2)}% volume capture)`,
+              );
+            } else if (
+              priceGapAnalysis &&
+              priceGapAnalysis.reason ===
+                'optimal_range_too_far_from_current_tick'
+            ) {
+              results.skippedDueToPriceGap++;
+              console.log(
+                `🕳️ Skipping position ${position.positionId} - optimal range too far from current tick (distance: ${priceGapAnalysis.distanceFromCurrent}, max: ${priceGapAnalysis.maxAllowedDistance})`,
               );
             } else {
               results.skipped++;
@@ -255,120 +268,245 @@ export class AerodromeFeeOptimiserRebalancingCronService
   ): Promise<boolean> {
     try {
       console.log(
-        `Checking rebalance conditions for position ${position.positionId}`,
+        `=== REBALANCE DECISION ANALYSIS FOR POSITION ${position.positionId} ===`,
       );
 
-      // Get current tick from pool using slot0 function
+      // Step 1: Validate position data
       const poolAddress = position.metadata?.poolAddress;
       if (!poolAddress) {
-        throw new Error(
-          `Pool address not found for position ${position.positionId}`,
-        );
+        console.log(`❌ Position ${position.positionId} missing pool address`);
+        return false;
       }
 
-      // Call pool's slot0 function to get current tick
-      const slot0Result = await this.aerodromeService['readContract'](
-        poolAddress,
-        poolAbi as unknown as any[],
-        'slot0',
-        [],
-      );
-      const decodedSlot0 =
-        this.aerodromeService['decodeSlot0Result'](slot0Result);
-      const currentTick = decodedSlot0.tick;
-
-      console.log(`Current tick: ${currentTick}`);
-
-      // Get tick ranges
-      const tickRange = position.metadata?.tickRange; // 0.5% range
-      const tickRangeRebalance = position.metadata?.tickRangeRebalance; // Configurable rebalance range
-      const rebalanceRange = position.metadata?.rebalanceRange || 3.0; // Default to 3% if not stored
-
-      if (!tickRange || !tickRangeRebalance) {
+      const tickRange = position.metadata?.tickRange;
+      if (!tickRange) {
         console.log(
-          `Position ${position.positionId} missing tick range data - skipping`,
+          `❌ Position ${position.positionId} missing tick range data`,
         );
         return false;
       }
 
-      console.log('Tick ranges:', {
+      // Step 2: Get current market tick
+      const currentTick = await this.getCurrentTickFromPool(poolAddress);
+      console.log(`📊 Current market tick: ${currentTick}`);
+
+      // Step 3: Get or calculate rebalance range
+      let tickRangeRebalance = position.metadata?.tickRangeRebalance;
+      const rebalanceRange = position.metadata?.rebalanceRange || 3.0;
+
+      if (!tickRangeRebalance) {
+        // Calculate rebalance range dynamically
+        const centerTick = Math.floor(
+          (tickRange.tickLower + tickRange.tickUpper) / 2,
+        );
+        const rangeWidth = tickRange.tickUpper - tickRange.tickLower;
+        const rebalanceWidth = Math.floor(rangeWidth * (rebalanceRange / 0.5));
+
+        tickRangeRebalance = {
+          tickLower: centerTick - Math.floor(rebalanceWidth / 2),
+          tickUpper: centerTick + Math.floor(rebalanceWidth / 2),
+        };
+
+        console.log(
+          `🔄 Calculated rebalance range: ${tickRangeRebalance.tickLower} to ${tickRangeRebalance.tickUpper}`,
+        );
+      }
+
+      console.log('📋 Position ranges:', {
         currentTick,
-        tickLower: tickRange.tickLower,
-        tickUpper: tickRange.tickUpper,
-        rebalanceRange: `${rebalanceRange}%`,
-        rebalanceLower: tickRangeRebalance.tickLower,
-        rebalanceUpper: tickRangeRebalance.tickUpper,
+        tickRange: `${tickRange.tickLower} to ${tickRange.tickUpper} (0.5%)`,
+        rebalanceRange: `${tickRangeRebalance.tickLower} to ${tickRangeRebalance.tickUpper} (${rebalanceRange}%)`,
       });
 
-      // Check if current tick is within 0.5% range (do nothing)
+      // Step 4: Check if within 0.5% range (NO REBALANCING)
       const isWithin05Range =
         currentTick >= tickRange.tickLower &&
         currentTick <= tickRange.tickUpper;
-
-      // Check if current tick is beyond rebalance range (rebalance immediately)
-      const isBeyondRebalanceRange =
-        currentTick < tickRangeRebalance.tickLower ||
-        currentTick > tickRangeRebalance.tickUpper;
-
       if (isWithin05Range) {
         console.log(
-          `Position ${position.positionId} is within 0.5% range - no rebalancing needed`,
+          `✅ Position ${position.positionId} is within 0.5% range - NO REBALANCING NEEDED`,
         );
         return false;
       }
 
+      // Step 5: Check if beyond rebalance range (IMMEDIATE REBALANCING)
+      const isBeyondRebalanceRange =
+        currentTick < tickRangeRebalance.tickLower ||
+        currentTick > tickRangeRebalance.tickUpper;
       if (isBeyondRebalanceRange) {
         console.log(
-          `Position ${position.positionId} is beyond ${rebalanceRange}% range - rebalancing immediately`,
+          `🚨 Position ${position.positionId} is beyond ${rebalanceRange}% range - MARKET CHECK BEFORE REBALANCING`,
         );
-        return true;
+        const marketCheck = await this.shouldRebalanceBasedOnMarket(
+          position,
+          50,
+          145,
+        );
+        return marketCheck.shouldRebalance;
       }
 
-      // Current tick is between 0.5% and rebalance range - check fee threshold and fee leak detection
+      // Step 6: Check if position hasn't earned fees in 3+ hours (TOP-LEVEL CONDITION)
+      const hoursSinceLastEarning = this.getHoursSinceLastFeeEarning(position);
+      if (hoursSinceLastEarning >= 3) {
+        console.log(
+          `⏰ Position ${position.positionId} hasn't earned fees in ${hoursSinceLastEarning.toFixed(1)} hours - MARKET CHECK BEFORE REBALANCING`,
+        );
+        const marketCheck = await this.shouldRebalanceBasedOnMarket(
+          position,
+          60,
+          145,
+        );
+        return marketCheck.shouldRebalance;
+      }
+
+      // Step 7: Position is between 0.5% and rebalance range - Fee Leak Detection Only
       console.log(
-        `Position ${position.positionId} is between 0.5% and ${rebalanceRange}% range - checking fee threshold and fee leak detection`,
+        `🤔 Position ${position.positionId} is between 0.5% and ${rebalanceRange}% range - checking for fee leak only`,
       );
 
-      const originalUsdcAmount = position.usdcAmount;
-      const feeThreshold = Math.max(1, originalUsdcAmount * 0.02); // $1 or 2% of invested capital
+      // Step 8: Calculate position value and fee thresholds
+      const totalPositionValue = this.calculatePositionValue(position);
+      const rebalanceCostThreshold = totalPositionValue * 0.003; // 0.3%
 
-      console.log('Fee threshold analysis:', {
-        collectedFees,
-        feeThreshold,
-        originalUsdcAmount,
-        thresholdMet: collectedFees >= feeThreshold,
+      console.log('💰 Fee analysis:', {
+        collectedFees: `$${collectedFees.toFixed(4)}`,
+        totalPositionValue: `$${totalPositionValue.toFixed(2)}`,
+        rebalanceCostThreshold: `$${rebalanceCostThreshold.toFixed(2)} (0.3% of position)`,
+        hasSufficientFees: collectedFees >= rebalanceCostThreshold,
       });
 
-      // Check if fees meet threshold
-      if (collectedFees >= feeThreshold) {
+      // Step 9: Check if we have sufficient fees for fee leak detection
+      const hasSufficientFees = collectedFees >= rebalanceCostThreshold;
+
+      if (!hasSufficientFees) {
+        // Step 9a: Check for emergency escape (significantly out of range)
+        const isSignificantlyOutOfRange =
+          currentTick < tickRange.tickLower - 200 ||
+          currentTick > tickRange.tickUpper + 200;
+
+        if (isSignificantlyOutOfRange) {
+          console.log(
+            `🚨 Position ${position.positionId} is significantly out of range - EMERGENCY REBALANCING despite insufficient fees`,
+          );
+          // Continue to volume capture analysis
+        } else {
+          console.log(
+            `⏸️ Position ${position.positionId} has insufficient fees and earned recently (${hoursSinceLastEarning.toFixed(1)}h ago) - SKIPPING FEE LEAK DETECTION`,
+          );
+          return false;
+        }
+      }
+
+      // Step 10: Fee leak detection (volume capture analysis) - ONLY rebalancing condition for 0.5-3% range
+      console.log(`🔍 Checking volume capture for fee leak detection...`);
+      const marketCheck = await this.shouldRebalanceBasedOnMarket(
+        position,
+        65,
+        145,
+      );
+      if (marketCheck.shouldRebalance) {
         console.log(
-          `Position ${position.positionId} meets fee threshold - rebalancing`,
+          `📉 Position ${position.positionId} has low volume capture - REBALANCING`,
         );
         return true;
       }
 
-      // Fee leak detection: Check volume capture only when between 0.5% and 3% range
-      console.log('Checking for volume capture (fee leak detection)...');
-      const volumeCaptureLow = await this.checkVolumeCapture(position);
-
-      if (volumeCaptureLow) {
-        console.log(
-          `Position ${position.positionId} has low volume capture - rebalancing`,
-        );
-        return true;
-      }
-
+      // Step 11: No rebalancing needed
       console.log(
-        `Position ${position.positionId} does not meet fee threshold and has adequate volume capture - skipping`,
+        `✅ Position ${position.positionId} has adequate volume capture - NO REBALANCING`,
       );
       return false;
     } catch (error) {
       console.error(
-        `Error checking rebalance conditions for position ${position.positionId}:`,
+        `❌ Error in rebalance decision for position ${position.positionId}:`,
         error,
       );
-      return false;
+      return false; // Fail safe - don't rebalance on error
     }
+  }
+
+  /**
+   * Calculate total position value using actualUsdcAmount or fallback to mint details calculation
+   */
+  private calculatePositionValue(position: any): number {
+    // First check if actualUsdcAmount is available (most accurate)
+    if (
+      position.actualUsdcAmount !== undefined &&
+      position.actualUsdcAmount !== null
+    ) {
+      console.log('💎 Using actualUsdcAmount for position value:', {
+        actualUsdcAmount: `$${position.actualUsdcAmount.toFixed(2)}`,
+        originalUsdcAmount: `$${position.usdcAmount}`,
+        slippageLoss: `$${(position.usdcAmount - position.actualUsdcAmount).toFixed(2)}`,
+      });
+      return position.actualUsdcAmount;
+    }
+
+    // Fallback to mint details calculation
+    const mintDetails = position.metadata?.mintDetails;
+
+    if (mintDetails) {
+      const amount0Raw = parseFloat(mintDetails.amount0 || '0');
+      const amount1Raw = parseFloat(mintDetails.amount1 || '0');
+      const token0PriceAtMint = parseFloat(
+        mintDetails.token0PriceAtMint || '0',
+      );
+      const token1PriceAtMint = parseFloat(
+        mintDetails.token1PriceAtMint || '0',
+      );
+
+      // Convert raw amounts to human-readable amounts
+      // WETH has 18 decimals, USDC has 6 decimals
+      const amount0Human = amount0Raw / 1e18; // Convert from wei to ETH
+      const amount1Human = amount1Raw / 1e6; // Convert from smallest units to USDC
+
+      const totalPositionValue =
+        amount0Human * token0PriceAtMint + amount1Human * token1PriceAtMint;
+
+      console.log('💎 Position value calculation (mint details fallback):', {
+        amount0Raw: amount0Raw.toExponential(2),
+        amount1Raw: amount1Raw.toExponential(2),
+        amount0Human: `${amount0Human.toFixed(6)} ETH`,
+        amount1Human: `${amount1Human.toFixed(6)} USDC`,
+        token0PriceAtMint: `$${token0PriceAtMint}`,
+        token1PriceAtMint: `$${token1PriceAtMint}`,
+        totalPositionValue: `$${totalPositionValue.toFixed(2)}`,
+      });
+
+      return totalPositionValue;
+    } else {
+      const fallbackValue = position.usdcAmount || 0;
+      console.log(
+        `⚠️ Using fallback usdcAmount for position value: $${fallbackValue}`,
+      );
+      return fallbackValue;
+    }
+  }
+
+  /**
+   * Get hours since last actual fee earning
+   */
+  private getHoursSinceLastFeeEarning(position: any): number {
+    const lastActualEarning = position.collectedFees?.lastActualEarning;
+    if (!lastActualEarning) {
+      console.log(
+        '⚠️ No lastActualEarning timestamp found - assuming old position with no recent earnings',
+      );
+      return 999; // Default to high number for old positions
+    }
+
+    const lastEarning = new Date(lastActualEarning);
+    const now = new Date();
+    const hoursDiff =
+      (now.getTime() - lastEarning.getTime()) / (1000 * 60 * 60);
+
+    console.log('⏰ Hours since last fee earning:', {
+      lastActualEarning,
+      now: now.toISOString(),
+      hoursDiff: hoursDiff.toFixed(2),
+    });
+
+    return hoursDiff;
   }
 
   /**
@@ -527,6 +665,55 @@ export class AerodromeFeeOptimiserRebalancingCronService
           meetsVolumeThreshold,
         });
 
+        // Check if optimal range is too far from current tick
+        const currentTick = await this.getCurrentTickFromPool(
+          position.metadata?.poolAddress,
+        );
+        const optimalRangeCenter =
+          (optimalRange.optimalTickLower + optimalRange.optimalTickUpper) / 2;
+        const distanceFromCurrent = Math.abs(currentTick - optimalRangeCenter);
+        const maxAllowedDistance = 145; // Conservative distance threshold for midpoint-based calculation
+
+        const isOptimalRangeTooFar = distanceFromCurrent > maxAllowedDistance;
+
+        console.log('Distance check:', {
+          currentTick,
+          optimalRangeCenter: optimalRangeCenter.toFixed(2),
+          distanceFromCurrent: distanceFromCurrent.toFixed(2),
+          maxAllowedDistance,
+          isOptimalRangeTooFar,
+          optimalRange: `${optimalRange.optimalTickLower} to ${optimalRange.optimalTickUpper}`,
+        });
+
+        if (isOptimalRangeTooFar) {
+          console.log(
+            `Optimal range too far from current tick - distance ${distanceFromCurrent.toFixed(2)} exceeds maximum ${maxAllowedDistance}. Possible price gap detected.`,
+          );
+
+          // Store price gap analysis in position metadata
+          position.metadata = position.metadata || {};
+          position.metadata.priceGapAnalysis = {
+            timestamp: new Date().toISOString(),
+            reason: 'optimal_range_too_far_from_current_tick',
+            currentTick,
+            optimalRangeCenter: optimalRangeCenter.toFixed(2),
+            distanceFromCurrent: distanceFromCurrent.toFixed(2),
+            maxAllowedDistance,
+            optimalRange: {
+              tickLower: optimalRange.optimalTickLower,
+              tickUpper: optimalRange.optimalTickUpper,
+            },
+            recommendation: 'skip_rebalancing_due_to_price_gap',
+          };
+
+          // Save the price gap analysis
+          await this.aerodromePositionModel.findByIdAndUpdate(position._id, {
+            metadata: position.metadata,
+          });
+
+          return false; // Don't rebalance when optimal range is too far
+        }
+
         if (!meetsVolumeThreshold) {
           console.log(
             `Market too volatile for rebalancing - optimal range only captures ${optimalRange.volumeCapturePercentage.toFixed(2)}% volume (below ${minVolumeThreshold}% threshold)`,
@@ -588,6 +775,68 @@ export class AerodromeFeeOptimiserRebalancingCronService
         error,
       );
       return false;
+    }
+  }
+
+  /**
+   * Get price gap analysis
+   */
+  private async getPriceGapAnalysis(
+    poolAddress: string,
+    optimalTickLower: number,
+    optimalTickUpper: number,
+  ): Promise<any> {
+    try {
+      const currentTick = await this.getCurrentTickFromPool(poolAddress);
+      const optimalRangeCenter = (optimalTickLower + optimalTickUpper) / 2;
+      const distanceFromCurrent = Math.abs(currentTick - optimalRangeCenter);
+      const maxAllowedDistance = 145; // Conservative distance threshold for midpoint-based calculation
+      const isOptimalRangeTooFar = distanceFromCurrent > maxAllowedDistance;
+
+      return {
+        currentTick,
+        optimalRangeCenter: optimalRangeCenter.toFixed(2),
+        distanceFromCurrent: distanceFromCurrent.toFixed(2),
+        maxAllowedDistance,
+        isOptimalRangeTooFar,
+        recommendation: isOptimalRangeTooFar
+          ? 'SKIP_REBALANCING_DUE_TO_PRICE_GAP'
+          : 'PROCEED_WITH_REBALANCING',
+        explanation: isOptimalRangeTooFar
+          ? `Optimal range center at ${optimalRangeCenter.toFixed(2)} is ${distanceFromCurrent.toFixed(2)} ticks from current tick ${currentTick} - exceeds maximum ${maxAllowedDistance} ticks`
+          : `Optimal range center at ${optimalRangeCenter.toFixed(2)} is ${distanceFromCurrent.toFixed(2)} ticks from current tick ${currentTick} - within safe ${maxAllowedDistance} tick limit`,
+      };
+    } catch (error) {
+      console.error('Error getting price gap analysis:', error);
+      return {
+        currentTick: 'Error getting current tick',
+        optimalRangeCenter: `${((optimalTickLower + optimalTickUpper) / 2).toFixed(2)}`,
+        distanceFromCurrent: 'N/A',
+        maxAllowedDistance: 145,
+        recommendation: 'ERROR_GETTING_CURRENT_TICK',
+        explanation: `Error getting current tick: ${error.message}`,
+      };
+    }
+  }
+
+  /**
+   * Get current tick from pool
+   */
+  private async getCurrentTickFromPool(poolAddress: string): Promise<number> {
+    try {
+      // Call pool's slot0 function to get current tick
+      const slot0Result = await this.aerodromeService['readContract'](
+        poolAddress,
+        poolAbi as unknown as any[],
+        'slot0',
+        [],
+      );
+      const decodedSlot0 =
+        this.aerodromeService['decodeSlot0Result'](slot0Result);
+      return decodedSlot0.tick;
+    } catch (error) {
+      console.error('Error getting current tick from pool:', error);
+      throw error;
     }
   }
 
@@ -776,7 +1025,7 @@ export class AerodromeFeeOptimiserRebalancingCronService
   }
 
   /**
-   * Test volume capture for a specific position
+   * Test volume capture for a specific position with complete decision logic
    */
   async testVolumeCaptureForPosition(
     positionId: string,
@@ -804,6 +1053,9 @@ export class AerodromeFeeOptimiserRebalancingCronService
         throw new Error(`Position ${positionId} missing tick range data`);
       }
 
+      // Simulate the complete decision logic
+      const decisionAnalysis = await this.simulateRebalanceDecision(position);
+
       const result = await this.testVolumeCaptureForRange(
         tickRange.tickLower,
         tickRange.tickUpper,
@@ -816,7 +1068,9 @@ export class AerodromeFeeOptimiserRebalancingCronService
           tickRange: position.metadata?.tickRange,
           strategyName: position.metadata?.strategyName,
           usdcAmount: position.usdcAmount,
+          mintDetails: position.metadata?.mintDetails,
         },
+        decisionAnalysis,
         ...result,
       };
     } catch (error) {
@@ -827,6 +1081,211 @@ export class AerodromeFeeOptimiserRebalancingCronService
       return {
         error: error.message,
         positionId,
+      };
+    }
+  }
+
+  /**
+   * Simulate the complete rebalance decision logic for testing
+   */
+  private async simulateRebalanceDecision(position: any): Promise<any> {
+    try {
+      console.log(
+        `=== SIMULATING REBALANCE DECISION FOR POSITION ${position.positionId} ===`,
+      );
+
+      // Step 1: Validate position data
+      const poolAddress = position.metadata?.poolAddress;
+      if (!poolAddress) {
+        return {
+          decision: 'SKIP',
+          reason: 'Missing pool address',
+          details: 'Position missing pool address',
+        };
+      }
+
+      const tickRange = position.metadata?.tickRange;
+      if (!tickRange) {
+        return {
+          decision: 'SKIP',
+          reason: 'Missing tick range data',
+          details: 'Position missing tickRange data',
+        };
+      }
+
+      // Step 2: Get current market tick
+      const currentTick = await this.getCurrentTickFromPool(poolAddress);
+      console.log(`📊 Current market tick: ${currentTick}`);
+
+      // Step 3: Get or calculate rebalance range
+      let tickRangeRebalance = position.metadata?.tickRangeRebalance;
+      const rebalanceRange = position.metadata?.rebalanceRange || 3.0;
+
+      if (!tickRangeRebalance) {
+        // Calculate rebalance range dynamically
+        const centerTick = Math.floor(
+          (tickRange.tickLower + tickRange.tickUpper) / 2,
+        );
+        const rangeWidth = tickRange.tickUpper - tickRange.tickLower;
+        const rebalanceWidth = Math.floor(rangeWidth * (rebalanceRange / 0.5));
+
+        tickRangeRebalance = {
+          tickLower: centerTick - Math.floor(rebalanceWidth / 2),
+          tickUpper: centerTick + Math.floor(rebalanceWidth / 2),
+        };
+
+        console.log(
+          `🔄 Calculated rebalance range: ${tickRangeRebalance.tickLower} to ${tickRangeRebalance.tickUpper}`,
+        );
+      }
+
+      console.log('📋 Position ranges:', {
+        currentTick,
+        tickRange: `${tickRange.tickLower} to ${tickRange.tickUpper} (0.5%)`,
+        rebalanceRange: `${tickRangeRebalance.tickLower} to ${tickRangeRebalance.tickUpper} (${rebalanceRange}%)`,
+      });
+
+      // Step 4: Check if within 0.5% range (NO REBALANCING)
+      const isWithin05Range =
+        currentTick >= tickRange.tickLower &&
+        currentTick <= tickRange.tickUpper;
+      if (isWithin05Range) {
+        return {
+          decision: 'NO_REBALANCING',
+          reason: 'Within 0.5% range',
+          details: `Current tick ${currentTick} is within range ${tickRange.tickLower} to ${tickRange.tickUpper}`,
+        };
+      }
+
+      // Step 5: Check if beyond rebalance range (IMMEDIATE REBALANCING)
+      const isBeyondRebalanceRange =
+        currentTick < tickRangeRebalance.tickLower ||
+        currentTick > tickRangeRebalance.tickUpper;
+      if (isBeyondRebalanceRange) {
+        return {
+          decision: 'IMMEDIATE_REBALANCING',
+          reason: 'Beyond rebalance range',
+          details: `Current tick ${currentTick} is beyond rebalance range ${tickRangeRebalance.tickLower} to ${tickRangeRebalance.tickUpper}`,
+        };
+      }
+
+      // Step 6: Position is between 0.5% and rebalance range - Smart Analysis Required
+      console.log(
+        `🤔 Position ${position.positionId} is between 0.5% and ${rebalanceRange}% range - analyzing fees`,
+      );
+
+      // Step 7: Get actual collected fees and calculate position value
+      const collectedFees = position.collectedFees?.totalFeesUSD || 0;
+      const totalPositionValue = this.calculatePositionValue(position);
+      const feeThreshold = Math.max(1, totalPositionValue * 0.02); // $1 or 2%
+      const rebalanceCostThreshold = totalPositionValue * 0.003; // 0.3%
+
+      console.log('💰 Fee analysis:', {
+        collectedFees: `$${collectedFees.toFixed(4)}`,
+        totalPositionValue: `$${totalPositionValue.toFixed(2)}`,
+        feeThreshold: `$${feeThreshold.toFixed(2)} (2% of position)`,
+        rebalanceCostThreshold: `$${rebalanceCostThreshold.toFixed(2)} (0.3% of position)`,
+        meetsFeeThreshold: collectedFees >= feeThreshold,
+        hasSufficientFees: collectedFees >= rebalanceCostThreshold,
+      });
+
+      // Step 8: Check if fees meet threshold (IMMEDIATE REBALANCING)
+      if (collectedFees >= feeThreshold) {
+        return {
+          decision: 'REBALANCE',
+          reason: 'Meets fee threshold',
+          details: {
+            collectedFees,
+            feeThreshold,
+            totalPositionValue,
+            thresholdMet: true,
+          },
+        };
+      }
+
+      // Step 9: Check if we have sufficient fees for fee leak detection
+      const hasSufficientFees = collectedFees >= rebalanceCostThreshold;
+
+      if (!hasSufficientFees) {
+        // Step 9a: Check for emergency escape (significantly out of range)
+        const isSignificantlyOutOfRange =
+          currentTick < tickRange.tickLower - 200 ||
+          currentTick > tickRange.tickUpper + 200;
+
+        if (isSignificantlyOutOfRange) {
+          return {
+            decision: 'PROCEED_TO_FEE_LEAK_CHECK',
+            reason: 'Emergency escape - significantly out of range',
+            details: {
+              collectedFees,
+              rebalanceCostThreshold,
+              totalPositionValue,
+              hasSufficientFees: false,
+              isSignificantlyOutOfRange: true,
+              distanceFromRange: Math.min(
+                Math.abs(currentTick - tickRange.tickLower),
+                Math.abs(currentTick - tickRange.tickUpper),
+              ),
+            },
+          };
+        } else {
+          // Step 9b: Check if position hasn't earned fees in 4+ hours
+          const hoursSinceLastEarning =
+            this.getHoursSinceLastFeeEarning(position);
+
+          if (hoursSinceLastEarning >= 4) {
+            return {
+              decision: 'REBALANCE',
+              reason: 'No fees earned in 4+ hours',
+              details: {
+                collectedFees,
+                rebalanceCostThreshold,
+                totalPositionValue,
+                hasSufficientFees: false,
+                isSignificantlyOutOfRange: false,
+                hoursSinceLastEarning,
+                recommendation: `Position hasn't earned fees in ${hoursSinceLastEarning.toFixed(1)} hours - triggering rebalance`,
+              },
+            };
+          }
+
+          return {
+            decision: 'SKIP_FEE_LEAK_CHECK',
+            reason: 'Insufficient fees and earned recently',
+            details: {
+              collectedFees,
+              rebalanceCostThreshold,
+              totalPositionValue,
+              hasSufficientFees: false,
+              isSignificantlyOutOfRange: false,
+              hoursSinceLastEarning,
+              recommendation: `Position earned fees ${hoursSinceLastEarning.toFixed(1)}h ago - skipping fee leak detection`,
+            },
+          };
+        }
+      }
+
+      // Step 10: Sufficient fees for fee leak detection
+      return {
+        decision: 'PROCEED_TO_FEE_LEAK_CHECK',
+        reason: 'Sufficient fees for fee leak detection',
+        details: {
+          collectedFees,
+          rebalanceCostThreshold,
+          totalPositionValue,
+          hasSufficientFees: true,
+          recommendation: 'Position will proceed to volume capture analysis',
+        },
+      };
+    } catch (error) {
+      console.error(
+        `❌ Error simulating rebalance decision for position ${position.positionId}:`,
+        error,
+      );
+      return {
+        decision: 'ERROR',
+        reason: 'Error in decision simulation',
+        details: error.message,
       };
     }
   }
@@ -947,6 +1406,7 @@ export class AerodromeFeeOptimiserRebalancingCronService
     rangeWidth: number,
     hours: number = 2,
     testVolatilityThreshold: boolean = false,
+    poolName: string = 'weth-usdc',
   ): Promise<any> {
     try {
       console.log(`=== TESTING OPTIMAL RANGE DETECTION ===`);
@@ -1055,7 +1515,16 @@ export class AerodromeFeeOptimiserRebalancingCronService
           r.tickLower === optimalTickLower && r.tickUpper === optimalTickUpper,
       );
 
+      // Get pool address from pools config
+      const poolConfig = getPoolConfig(poolName);
+      if (!poolConfig) {
+        throw new Error(`Pool configuration not found for: ${poolName}`);
+      }
+      const poolAddress = poolConfig.address;
+
       const result = {
+        poolName,
+        poolAddress,
         rangeWidth,
         timePeriod: `${hours} hours`,
         totalSwaps: allSwaps.length,
@@ -1085,6 +1554,20 @@ export class AerodromeFeeOptimiserRebalancingCronService
                 ? `Optimal range captures ${optimalRangeData?.volumeCapturePercentage.toFixed(2)}% volume - meets 65% threshold for safe rebalancing`
                 : `Optimal range captures ${optimalRangeData?.volumeCapturePercentage.toFixed(2)}% volume - below 65% threshold, market too volatile for rebalancing`,
           },
+          priceGapAnalysis: poolAddress
+            ? await this.getPriceGapAnalysis(
+                poolAddress,
+                optimalTickLower,
+                optimalTickUpper,
+              )
+            : {
+                currentTick: 'N/A (requires pool address)',
+                optimalRangeCenter: `${((optimalTickLower + optimalTickUpper) / 2).toFixed(2)}`,
+                distanceFromCurrent: 'N/A (requires current tick)',
+                maxAllowedDistance: 145,
+                recommendation: 'CHECK_DISTANCE_FROM_CURRENT_TICK',
+                explanation: `Optimal range center at ${((optimalTickLower + optimalTickUpper) / 2).toFixed(2)}, should be within 145 ticks of current tick`,
+              },
         }),
         timestamp: new Date().toISOString(),
       };
@@ -1154,5 +1637,74 @@ export class AerodromeFeeOptimiserRebalancingCronService
         timePeriod: `${hours} hours`,
       };
     }
+  }
+
+  private async shouldRebalanceBasedOnMarket(
+    position: any,
+    volumeThreshold: number, // e.g. 50, 60, 65
+    tickDistanceThreshold: number = 145, // default, but can be changed per scenario
+  ): Promise<{ shouldRebalance: boolean; optimalRange?: any }> {
+    const tickRange = position.metadata?.tickRange;
+    if (!tickRange) return { shouldRebalance: false };
+    const tickLower = tickRange.tickLower;
+    const tickUpper = tickRange.tickUpper;
+
+    // Get volume data for last 2 hours
+    const volumeData = await this.getLast2HoursVolumeData(tickLower, tickUpper);
+    if (volumeData.allSwaps.length === 0) return { shouldRebalance: false };
+
+    // Calculate USD volumes
+    const wethPrice = await this.aerodromeService.getTokenPrice('WETH');
+    const rangeWethUsd = (volumeData.rangeVolume.wethVolume / 1e18) * wethPrice;
+    const rangeUsdcUsd = volumeData.rangeVolume.usdcVolume / 1e6;
+    const rangeTotalUsd = rangeWethUsd + rangeUsdcUsd;
+    const totalWethUsd = (volumeData.totalVolume.wethVolume / 1e18) * wethPrice;
+    const totalUsdcUsd = volumeData.totalVolume.usdcVolume / 1e6;
+    const totalPoolUsd = totalWethUsd + totalUsdcUsd;
+    const volumeCapturePercentage =
+      totalPoolUsd > 0 ? (rangeTotalUsd / totalPoolUsd) * 100 : 0;
+
+    // If current range is above threshold, no rebalance
+    if (volumeCapturePercentage >= volumeThreshold)
+      return { shouldRebalance: false };
+
+    // Find optimal range
+    const optimalRange = await this.findOptimalTickRange(
+      tickLower,
+      tickUpper,
+      2,
+    );
+    const meetsVolumeThreshold =
+      optimalRange.volumeCapturePercentage >= volumeThreshold;
+    const currentTick = await this.getCurrentTickFromPool(
+      position.metadata?.poolAddress,
+    );
+    const optimalRangeCenter =
+      (optimalRange.optimalTickLower + optimalRange.optimalTickUpper) / 2;
+    const distanceFromCurrent = Math.abs(currentTick - optimalRangeCenter);
+    const isOptimalRangeTooFar = distanceFromCurrent > tickDistanceThreshold;
+
+    if (!meetsVolumeThreshold) {
+      // Optionally store volatility analysis here
+      return { shouldRebalance: false, optimalRange };
+    }
+    if (isOptimalRangeTooFar) {
+      // Optionally store price gap analysis here
+      return { shouldRebalance: false, optimalRange };
+    }
+    // Store optimal range for rebalance
+    position.metadata = position.metadata || {};
+    position.metadata.optimalRebalanceRange = {
+      tickLower: optimalRange.optimalTickLower,
+      tickUpper: optimalRange.optimalTickUpper,
+      volumeCapturePercentage: optimalRange.volumeCapturePercentage,
+      volumeInOptimalRange: optimalRange.volumeInOptimalRange,
+      analysisTimestamp: new Date().toISOString(),
+      meetsVolumeThreshold: true,
+    };
+    await this.aerodromePositionModel.findByIdAndUpdate(position._id, {
+      metadata: position.metadata,
+    });
+    return { shouldRebalance: true, optimalRange };
   }
 }

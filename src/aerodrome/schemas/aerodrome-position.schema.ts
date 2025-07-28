@@ -14,6 +14,9 @@ export class AerodromePosition {
   @Prop({ required: true })
   usdcAmount: number;
 
+  @Prop()
+  actualUsdcAmount?: number; // Actual amount invested after slippage
+
   @Prop({ required: true })
   positionId: string;
 
