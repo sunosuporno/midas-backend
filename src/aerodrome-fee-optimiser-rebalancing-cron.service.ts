@@ -271,7 +271,23 @@ export class AerodromeFeeOptimiserRebalancingCronService
         `=== REBALANCE DECISION ANALYSIS FOR POSITION ${position.positionId} ===`,
       );
 
-      // Step 1: Validate position data
+      // Step 1: Get dynamic thresholds based on current market conditions
+      const dynamicThresholds = await this.getDynamicRebalancingThresholds();
+
+      console.log('🎯 Dynamic thresholds for rebalancing decision:', {
+        rebalanceThreshold: `${(dynamicThresholds.rebalanceThreshold * 100).toFixed(2)}%`,
+        noFeesThreshold: `${dynamicThresholds.noFeesThreshold}h`,
+        feeLeakThreshold: `${dynamicThresholds.feeLeakThreshold}%`,
+        optimalRangeThreshold: `${dynamicThresholds.optimalRangeThreshold}%`,
+        marketCondition: dynamicThresholds.isExtraHighVolume
+          ? 'EXTRA HIGH VOLUME'
+          : dynamicThresholds.isHighVolume
+            ? 'HIGH VOLUME'
+            : 'NORMAL',
+        reason: dynamicThresholds.reason,
+      });
+
+      // Step 2: Validate position data
       const poolAddress = position.metadata?.poolAddress;
       if (!poolAddress) {
         console.log(`❌ Position ${position.positionId} missing pool address`);
@@ -339,22 +355,34 @@ export class AerodromeFeeOptimiserRebalancingCronService
         );
         const marketCheck = await this.shouldRebalanceBasedOnMarket(
           position,
-          50,
+          dynamicThresholds.optimalRangeThreshold,
           145,
+          {
+            isHighVolume: dynamicThresholds.isHighVolume,
+            isExtraHighVolume: dynamicThresholds.isExtraHighVolume,
+            reason: dynamicThresholds.reason,
+          },
         );
         return marketCheck.shouldRebalance;
       }
 
-      // Step 6: Check if position hasn't earned fees in 3+ hours (TOP-LEVEL CONDITION)
+      // Step 6: Check if position hasn't earned fees based on time-based threshold (TOP-LEVEL CONDITION)
       const hoursSinceLastEarning = this.getHoursSinceLastFeeEarning(position);
-      if (hoursSinceLastEarning >= 3) {
+      const noFeesThreshold = await this.getNoFeesThreshold();
+
+      if (hoursSinceLastEarning >= noFeesThreshold) {
         console.log(
-          `⏰ Position ${position.positionId} hasn't earned fees in ${hoursSinceLastEarning.toFixed(1)} hours - MARKET CHECK BEFORE REBALANCING`,
+          `⏰ Position ${position.positionId} hasn't earned fees in ${hoursSinceLastEarning.toFixed(1)} hours (threshold: ${noFeesThreshold}h) - MARKET CHECK BEFORE REBALANCING`,
         );
         const marketCheck = await this.shouldRebalanceBasedOnMarket(
           position,
-          60,
+          dynamicThresholds.optimalRangeThreshold,
           145,
+          {
+            isHighVolume: dynamicThresholds.isHighVolume,
+            isExtraHighVolume: dynamicThresholds.isExtraHighVolume,
+            reason: dynamicThresholds.reason,
+          },
         );
         return marketCheck.shouldRebalance;
       }
@@ -366,13 +394,16 @@ export class AerodromeFeeOptimiserRebalancingCronService
 
       // Step 8: Calculate position value and fee thresholds
       const totalPositionValue = this.calculatePositionValue(position);
-      const rebalanceCostThreshold = totalPositionValue * 0.003; // 0.3%
+      const rebalanceCostThreshold =
+        totalPositionValue * dynamicThresholds.rebalanceThreshold;
 
       console.log('💰 Fee analysis:', {
         collectedFees: `$${collectedFees.toFixed(4)}`,
         totalPositionValue: `$${totalPositionValue.toFixed(2)}`,
-        rebalanceCostThreshold: `$${rebalanceCostThreshold.toFixed(2)} (0.3% of position)`,
+        rebalanceCostThreshold: `$${rebalanceCostThreshold.toFixed(2)} (${(dynamicThresholds.rebalanceThreshold * 100).toFixed(2)}% of position)`,
         hasSufficientFees: collectedFees >= rebalanceCostThreshold,
+        isHighVolume: dynamicThresholds.isHighVolume,
+        reason: dynamicThresholds.reason,
       });
 
       // Step 9: Check if we have sufficient fees for fee leak detection
@@ -398,22 +429,29 @@ export class AerodromeFeeOptimiserRebalancingCronService
       }
 
       // Step 10: Fee leak detection (volume capture analysis) - ONLY rebalancing condition for 0.5-3% range
-      console.log(`🔍 Checking volume capture for fee leak detection...`);
+      console.log(
+        `🔍 Checking volume capture for fee leak detection (threshold: ${dynamicThresholds.feeLeakThreshold}%)...`,
+      );
       const marketCheck = await this.shouldRebalanceBasedOnMarket(
         position,
-        65,
+        dynamicThresholds.feeLeakThreshold,
         145,
+        {
+          isHighVolume: dynamicThresholds.isHighVolume,
+          isExtraHighVolume: dynamicThresholds.isExtraHighVolume,
+          reason: dynamicThresholds.reason,
+        },
       );
       if (marketCheck.shouldRebalance) {
         console.log(
-          `📉 Position ${position.positionId} has low volume capture - REBALANCING`,
+          `📉 Position ${position.positionId} has low volume capture - REBALANCING due to fee leak`,
         );
         return true;
       }
 
       // Step 11: No rebalancing needed
       console.log(
-        `✅ Position ${position.positionId} has adequate volume capture - NO REBALANCING`,
+        `✅ Position ${position.positionId} has adequate volume capture - NO REBALANCING needed`,
       );
       return false;
     } catch (error) {
@@ -510,6 +548,113 @@ export class AerodromeFeeOptimiserRebalancingCronService
   }
 
   /**
+   * Determine the appropriate "no fees" threshold based on time of day and day of week
+   * Extra high volume period (>80M USD in 1 hour): 1 hour
+   * High volume period (7:00 PM - 12:00 AM IST, Mon-Fri): 1 hour
+   * Low volume period (12:00 AM - 7:00 PM IST, Mon-Fri + Weekends): 3 hours
+   */
+  private async getNoFeesThreshold(): Promise<number> {
+    const thresholds = await this.getDynamicRebalancingThresholds();
+
+    console.log('🕐 Dynamic threshold analysis:', {
+      isHighVolume: thresholds.isHighVolume,
+      isExtraHighVolume: thresholds.isExtraHighVolume,
+      reason: thresholds.reason,
+      noFeesThreshold: `${thresholds.noFeesThreshold} hours`,
+      period: thresholds.isExtraHighVolume
+        ? 'EXTRA HIGH VOLUME'
+        : thresholds.isHighVolume
+          ? 'HIGH VOLUME'
+          : 'NORMAL VOLUME',
+    });
+
+    return thresholds.noFeesThreshold;
+  }
+
+  /**
+   * Get detailed time-based threshold analysis for testing
+   */
+  private async getTimeBasedThresholdAnalysis(): Promise<any> {
+    const now = new Date();
+    const istTime = new Date(now.getTime() + 5.5 * 60 * 60 * 1000);
+
+    const dayOfWeek = istTime.getDay();
+    const hourOfDay = istTime.getHours();
+    const minuteOfDay = istTime.getMinutes();
+    const timeInMinutes = hourOfDay * 60 + minuteOfDay;
+
+    const isWeekday = dayOfWeek >= 1 && dayOfWeek <= 5;
+    const isHighVolumeTime = timeInMinutes >= 19 * 60 || timeInMinutes < 0;
+    const isHighVolumePeriod = isWeekday && isHighVolumeTime;
+
+    // Get the complete volume analysis including extra high volume periods
+    const highVolumeCheck = await this.checkHighVolumePeriod();
+    const threshold = await this.getNoFeesThreshold();
+
+    // Determine the period type based on both time and volume conditions
+    let periodType = 'NORMAL VOLUME';
+    let explanation =
+      'Normal volume period - standard rebalancing (2h threshold)';
+
+    if (highVolumeCheck.isExtraHighVolume) {
+      periodType = 'EXTRA HIGH VOLUME';
+      explanation =
+        'Extra high volume period - ultra-aggressive rebalancing (1h threshold)';
+    } else if (highVolumeCheck.isHighVolume || isHighVolumePeriod) {
+      periodType = 'HIGH VOLUME';
+      explanation =
+        'High volume period - more aggressive rebalancing (1h threshold)';
+    }
+
+    return {
+      currentTime: {
+        utc: now.toISOString(),
+        ist: istTime.toISOString(),
+        dayOfWeek: [
+          'Sunday',
+          'Monday',
+          'Tuesday',
+          'Wednesday',
+          'Thursday',
+          'Friday',
+          'Saturday',
+        ][dayOfWeek],
+        hourOfDay,
+        minuteOfDay,
+        timeInMinutes,
+      },
+      analysis: {
+        isWeekday,
+        isHighVolumeTime,
+        isHighVolumePeriod,
+        isHighVolume: highVolumeCheck.isHighVolume,
+        isExtraHighVolume: highVolumeCheck.isExtraHighVolume,
+        threshold: `${threshold} hours`,
+        period: periodType,
+        explanation: explanation,
+        reason: highVolumeCheck.reason,
+      },
+      thresholds: {
+        normalVolumePeriod: '2.0 hours',
+        highVolumePeriod: '1.0 hours',
+        extraHighVolumePeriod: '1.0 hours',
+        currentThreshold: `${threshold} hours`,
+      },
+      timeRanges: {
+        highVolume: 'Monday-Friday, 7:00 PM - 12:00 AM IST',
+        lowVolume: 'Weekends + Monday-Friday, 12:00 AM - 7:00 PM IST',
+      },
+      volumeAnalysis: {
+        isHighVolume: highVolumeCheck.isHighVolume,
+        isExtraHighVolume: highVolumeCheck.isExtraHighVolume,
+        reason: highVolumeCheck.reason,
+        volumeData: highVolumeCheck.volumeData,
+        timeData: highVolumeCheck.timeData,
+      },
+    };
+  }
+
+  /**
    * Get volume data for the last 2 hours
    */
   private async getLast2HoursVolumeData(
@@ -521,22 +666,32 @@ export class AerodromeFeeOptimiserRebalancingCronService
     rangeVolume: { wethVolume: number; usdcVolume: number };
     totalVolume: { wethVolume: number; usdcVolume: number };
   }> {
-    const twoHoursAgo = Math.floor(Date.now() / 1000) - 2 * 60 * 60;
+    return this.getVolumeDataForHours(2, tickLower, tickUpper);
+  }
+
+  private async getVolumeDataForHours(
+    hours: number,
+    tickLower?: number,
+    tickUpper?: number,
+  ): Promise<{
+    swapsInRange: any[];
+    allSwaps: any[];
+    rangeVolume: { wethVolume: number; usdcVolume: number };
+    totalVolume: { wethVolume: number; usdcVolume: number };
+  }> {
+    const timeAgo = Math.floor(Date.now() / 1000) - hours * 60 * 60;
     const now = Math.floor(Date.now() / 1000);
 
-    // Get all swaps in pool for last 2 hours
-    const allSwaps = await this.subgraphService.getSwapsInPool(
-      twoHoursAgo,
-      now,
-    );
+    // Get all swaps in pool for last N hours
+    const allSwaps = await this.subgraphService.getSwapsInPool(timeAgo, now);
 
     let swapsInRange = [];
     if (tickLower !== undefined && tickUpper !== undefined) {
-      // Get swaps within specific tick range for last 2 hours
+      // Get swaps within specific tick range for last N hours
       swapsInRange = await this.subgraphService.getSwapsInRange(
         tickLower,
         tickUpper,
-        twoHoursAgo,
+        timeAgo,
         now,
       );
     }
@@ -859,18 +1014,20 @@ export class AerodromeFeeOptimiserRebalancingCronService
   }> {
     try {
       console.log(
-        `Finding optimal tick range for original range ${originalTickLower} to ${originalTickUpper}`,
+        `Finding optimal tick range for original range ${originalTickLower} to ${originalTickUpper} (using ${hours}-hour data)`,
       );
 
       const rangeWidth = originalTickUpper - originalTickLower;
       console.log(`Original range width: ${rangeWidth} ticks`);
 
-      // Get all swaps in the last 2 hours
+      // Get all swaps in the specified hours
       const hoursAgo = Math.floor(Date.now() / 1000) - hours * 60 * 60;
       const now = Math.floor(Date.now() / 1000);
 
       const allSwaps = await this.subgraphService.getSwapsInPool(hoursAgo, now);
-      console.log(`Analyzing ${allSwaps.length} swaps for optimal range`);
+      console.log(
+        `Analyzing ${allSwaps.length} swaps for optimal range (${hours}-hour timeframe)`,
+      );
 
       if (allSwaps.length === 0) {
         throw new Error('No swaps found in the specified time period');
@@ -1029,7 +1186,7 @@ export class AerodromeFeeOptimiserRebalancingCronService
    */
   async testVolumeCaptureForPosition(
     positionId: string,
-    hours: number = 2,
+    hours?: number, // Made optional to use dynamic timeframes
   ): Promise<any> {
     try {
       console.log(`=== TESTING VOLUME CAPTURE FOR POSITION ${positionId} ===`);
@@ -1053,13 +1210,48 @@ export class AerodromeFeeOptimiserRebalancingCronService
         throw new Error(`Position ${positionId} missing tick range data`);
       }
 
-      // Simulate the complete decision logic
-      const decisionAnalysis = await this.simulateRebalanceDecision(position);
+      // Get dynamic thresholds and high volume data
+      const dynamicThresholds = await this.getDynamicRebalancingThresholds();
+      const highVolumeData = {
+        isHighVolume: dynamicThresholds.isHighVolume,
+        isExtraHighVolume: dynamicThresholds.isExtraHighVolume,
+        reason: dynamicThresholds.reason,
+      };
+
+      // Determine analysis timeframe based on market conditions
+      let analysisHours: number;
+      let volumeCondition: string;
+      if (highVolumeData.isExtraHighVolume) {
+        analysisHours = 1; // 1 hour for extra high volume
+        volumeCondition = 'EXTRA HIGH VOLUME';
+      } else if (highVolumeData.isHighVolume) {
+        analysisHours = 1.5; // 1.5 hours for high volume
+        volumeCondition = 'HIGH VOLUME';
+      } else {
+        analysisHours = 2; // 2 hours for normal volume
+        volumeCondition = 'NORMAL';
+      }
+
+      // Use provided hours if specified, otherwise use dynamic timeframe
+      const finalHours = hours || analysisHours;
+
+      console.log(
+        `📊 Using ${finalHours}-hour analysis (${volumeCondition} period)`,
+      );
+
+      // Simulate the complete decision logic with updated parameters
+      const decisionAnalysis = await this.simulateRebalanceDecision(
+        position,
+        highVolumeData,
+      );
+
+      // Add time-based threshold analysis
+      const timeBasedAnalysis = this.getTimeBasedThresholdAnalysis();
 
       const result = await this.testVolumeCaptureForRange(
         tickRange.tickLower,
         tickRange.tickUpper,
-        hours,
+        finalHours,
       );
 
       return {
@@ -1071,6 +1263,7 @@ export class AerodromeFeeOptimiserRebalancingCronService
           mintDetails: position.metadata?.mintDetails,
         },
         decisionAnalysis,
+        timeBasedAnalysis,
         ...result,
       };
     } catch (error) {
@@ -1088,7 +1281,14 @@ export class AerodromeFeeOptimiserRebalancingCronService
   /**
    * Simulate the complete rebalance decision logic for testing
    */
-  private async simulateRebalanceDecision(position: any): Promise<any> {
+  private async simulateRebalanceDecision(
+    position: any,
+    highVolumeData?: {
+      isHighVolume: boolean;
+      isExtraHighVolume: boolean;
+      reason: string;
+    },
+  ): Promise<any> {
     try {
       console.log(
         `=== SIMULATING REBALANCE DECISION FOR POSITION ${position.positionId} ===`,
@@ -1229,14 +1429,15 @@ export class AerodromeFeeOptimiserRebalancingCronService
             },
           };
         } else {
-          // Step 9b: Check if position hasn't earned fees in 4+ hours
+          // Step 9b: Check if position hasn't earned fees based on time-based threshold
           const hoursSinceLastEarning =
             this.getHoursSinceLastFeeEarning(position);
+          const noFeesThreshold = await this.getNoFeesThreshold();
 
-          if (hoursSinceLastEarning >= 4) {
+          if (hoursSinceLastEarning >= noFeesThreshold) {
             return {
               decision: 'REBALANCE',
-              reason: 'No fees earned in 4+ hours',
+              reason: `No fees earned in ${noFeesThreshold}+ hours (time-based threshold)`,
               details: {
                 collectedFees,
                 rebalanceCostThreshold,
@@ -1244,7 +1445,8 @@ export class AerodromeFeeOptimiserRebalancingCronService
                 hasSufficientFees: false,
                 isSignificantlyOutOfRange: false,
                 hoursSinceLastEarning,
-                recommendation: `Position hasn't earned fees in ${hoursSinceLastEarning.toFixed(1)} hours - triggering rebalance`,
+                noFeesThreshold,
+                recommendation: `Position hasn't earned fees in ${hoursSinceLastEarning.toFixed(1)} hours (threshold: ${noFeesThreshold}h) - triggering rebalance`,
               },
             };
           }
@@ -1265,18 +1467,51 @@ export class AerodromeFeeOptimiserRebalancingCronService
         }
       }
 
-      // Step 10: Sufficient fees for fee leak detection
-      return {
-        decision: 'PROCEED_TO_FEE_LEAK_CHECK',
-        reason: 'Sufficient fees for fee leak detection',
-        details: {
-          collectedFees,
-          rebalanceCostThreshold,
-          totalPositionValue,
-          hasSufficientFees: true,
-          recommendation: 'Position will proceed to volume capture analysis',
-        },
-      };
+      // Step 10: Sufficient fees for fee leak detection - Now perform actual volume capture analysis
+      console.log(
+        '🔍 Performing volume capture analysis with shouldRebalanceBasedOnMarket...',
+      );
+
+      // Get dynamic thresholds for proper analysis
+      const dynamicThresholds = await this.getDynamicRebalancingThresholds();
+
+      // Perform volume capture analysis using the updated function
+      const marketCheck = await this.shouldRebalanceBasedOnMarket(
+        position,
+        dynamicThresholds.feeLeakThreshold,
+        145,
+        highVolumeData,
+      );
+
+      if (marketCheck.shouldRebalance) {
+        return {
+          decision: 'REBALANCE',
+          reason: 'Low volume capture detected',
+          details: {
+            collectedFees,
+            rebalanceCostThreshold,
+            totalPositionValue,
+            hasSufficientFees: true,
+            volumeCaptureAnalysis: marketCheck,
+            recommendation:
+              'Position has low volume capture - rebalancing recommended',
+          },
+        };
+      } else {
+        return {
+          decision: 'NO_REBALANCING',
+          reason: 'Adequate volume capture',
+          details: {
+            collectedFees,
+            rebalanceCostThreshold,
+            totalPositionValue,
+            hasSufficientFees: true,
+            volumeCaptureAnalysis: marketCheck,
+            recommendation:
+              'Position has adequate volume capture - no rebalancing needed',
+          },
+        };
+      }
     } catch (error) {
       console.error(
         `❌ Error simulating rebalance decision for position ${position.positionId}:`,
@@ -1296,15 +1531,40 @@ export class AerodromeFeeOptimiserRebalancingCronService
   async testVolumeCaptureForRange(
     tickLower: number,
     tickUpper: number,
-    hours: number = 2,
+    hours?: number, // Made optional to use dynamic timeframes
   ): Promise<any> {
+    // Get dynamic thresholds and high volume data if hours not specified
+    let finalHours = hours;
+    let volumeCondition = 'MANUAL';
+
     try {
+      if (!hours) {
+        const dynamicThresholds = await this.getDynamicRebalancingThresholds();
+        const highVolumeData = {
+          isHighVolume: dynamicThresholds.isHighVolume,
+          isExtraHighVolume: dynamicThresholds.isExtraHighVolume,
+          reason: dynamicThresholds.reason,
+        };
+
+        // Determine analysis timeframe based on market conditions
+        if (highVolumeData.isExtraHighVolume) {
+          finalHours = 1; // 1 hour for extra high volume
+          volumeCondition = 'EXTRA HIGH VOLUME';
+        } else if (highVolumeData.isHighVolume) {
+          finalHours = 1.5; // 1.5 hours for high volume
+          volumeCondition = 'HIGH VOLUME';
+        } else {
+          finalHours = 2; // 2 hours for normal volume
+          volumeCondition = 'NORMAL';
+        }
+      }
+
       console.log(
         `=== TESTING VOLUME CAPTURE FOR RANGE ${tickLower} to ${tickUpper} ===`,
       );
-      console.log(`Time period: Last ${hours} hours`);
+      console.log(`Time period: Last ${finalHours} hours (${volumeCondition})`);
 
-      const hoursAgo = Math.floor(Date.now() / 1000) - hours * 60 * 60;
+      const hoursAgo = Math.floor(Date.now() / 1000) - finalHours * 60 * 60;
       const now = Math.floor(Date.now() / 1000);
 
       console.log(
@@ -1353,7 +1613,7 @@ export class AerodromeFeeOptimiserRebalancingCronService
 
       const result = {
         tickRange: { tickLower, tickUpper },
-        timePeriod: `${hours} hours`,
+        timePeriod: `${finalHours} hours`,
         volumeData: {
           swapsInRange: swapsInRange.length,
           totalSwaps: allSwaps.length,
@@ -1394,7 +1654,7 @@ export class AerodromeFeeOptimiserRebalancingCronService
       return {
         error: error.message,
         tickRange: { tickLower, tickUpper },
-        timePeriod: `${hours} hours`,
+        timePeriod: `${hours || 'dynamic'} hours`,
       };
     }
   }
@@ -1404,17 +1664,42 @@ export class AerodromeFeeOptimiserRebalancingCronService
    */
   async testOptimalRangeDetection(
     rangeWidth: number,
-    hours: number = 2,
+    hours?: number, // Made optional to use dynamic timeframes
     testVolatilityThreshold: boolean = false,
     poolName: string = 'weth-usdc',
   ): Promise<any> {
     try {
+      // Get dynamic thresholds and high volume data if hours not specified
+      let finalHours = hours;
+      let volumeCondition = 'MANUAL';
+
+      if (!hours) {
+        const dynamicThresholds = await this.getDynamicRebalancingThresholds();
+        const highVolumeData = {
+          isHighVolume: dynamicThresholds.isHighVolume,
+          isExtraHighVolume: dynamicThresholds.isExtraHighVolume,
+          reason: dynamicThresholds.reason,
+        };
+
+        // Determine analysis timeframe based on market conditions
+        if (highVolumeData.isExtraHighVolume) {
+          finalHours = 1; // 1 hour for extra high volume
+          volumeCondition = 'EXTRA HIGH VOLUME';
+        } else if (highVolumeData.isHighVolume) {
+          finalHours = 1.5; // 1.5 hours for high volume
+          volumeCondition = 'HIGH VOLUME';
+        } else {
+          finalHours = 2; // 2 hours for normal volume
+          volumeCondition = 'NORMAL';
+        }
+      }
+
       console.log(`=== TESTING OPTIMAL RANGE DETECTION ===`);
       console.log(`Range width: ${rangeWidth} ticks`);
-      console.log(`Time period: Last ${hours} hours`);
+      console.log(`Time period: Last ${finalHours} hours (${volumeCondition})`);
 
-      // Get all swaps in the last 2 hours
-      const hoursAgo = Math.floor(Date.now() / 1000) - hours * 60 * 60;
+      // Get all swaps in the specified time period
+      const hoursAgo = Math.floor(Date.now() / 1000) - finalHours * 60 * 60;
       const now = Math.floor(Date.now() / 1000);
 
       const allSwaps = await this.subgraphService.getSwapsInPool(hoursAgo, now);
@@ -1589,12 +1874,37 @@ export class AerodromeFeeOptimiserRebalancingCronService
   /**
    * Test current pool volume capture (no specific range)
    */
-  async testCurrentPoolVolumeCapture(hours: number = 2): Promise<any> {
-    try {
-      console.log(`=== TESTING CURRENT POOL VOLUME CAPTURE ===`);
-      console.log(`Time period: Last ${hours} hours`);
+  async testCurrentPoolVolumeCapture(hours?: number): Promise<any> {
+    // Get dynamic thresholds and high volume data if hours not specified
+    let finalHours = hours;
+    let volumeCondition = 'MANUAL';
 
-      const hoursAgo = Math.floor(Date.now() / 1000) - hours * 60 * 60;
+    try {
+      if (!hours) {
+        const dynamicThresholds = await this.getDynamicRebalancingThresholds();
+        const highVolumeData = {
+          isHighVolume: dynamicThresholds.isHighVolume,
+          isExtraHighVolume: dynamicThresholds.isExtraHighVolume,
+          reason: dynamicThresholds.reason,
+        };
+
+        // Determine analysis timeframe based on market conditions
+        if (highVolumeData.isExtraHighVolume) {
+          finalHours = 1; // 1 hour for extra high volume
+          volumeCondition = 'EXTRA HIGH VOLUME';
+        } else if (highVolumeData.isHighVolume) {
+          finalHours = 1.5; // 1.5 hours for high volume
+          volumeCondition = 'HIGH VOLUME';
+        } else {
+          finalHours = 2; // 2 hours for normal volume
+          volumeCondition = 'NORMAL';
+        }
+      }
+
+      console.log(`=== TESTING CURRENT POOL VOLUME CAPTURE ===`);
+      console.log(`Time period: Last ${finalHours} hours (${volumeCondition})`);
+
+      const hoursAgo = Math.floor(Date.now() / 1000) - finalHours * 60 * 60;
       const now = Math.floor(Date.now() / 1000);
 
       // Get all swaps in pool for the specified hours
@@ -1613,7 +1923,7 @@ export class AerodromeFeeOptimiserRebalancingCronService
       const totalPoolUsd = totalWethUsd + totalUsdcUsd;
 
       const result = {
-        timePeriod: `${hours} hours`,
+        timePeriod: `${finalHours} hours`,
         poolVolume: {
           totalSwaps: allSwaps.length,
           wethVolume: totalVolume.wethVolume.toExponential(2),
@@ -1634,7 +1944,96 @@ export class AerodromeFeeOptimiserRebalancingCronService
       console.error('Error testing current pool volume capture:', error);
       return {
         error: error.message,
-        timePeriod: `${hours} hours`,
+        timePeriod: `${finalHours || 'dynamic'} hours`,
+      };
+    }
+  }
+
+  /**
+   * Test time boundary enforcement
+   */
+  async testTimeBoundaries(hours: number = 2): Promise<any> {
+    try {
+      console.log(`=== TESTING TIME BOUNDARIES FOR ${hours} HOURS ===`);
+
+      const hoursAgo = Math.floor(Date.now() / 1000) - hours * 60 * 60;
+      const now = Math.floor(Date.now() / 1000);
+
+      console.log('Time parameters:', {
+        hoursAgo: new Date(hoursAgo * 1000).toISOString(),
+        now: new Date(now * 1000).toISOString(),
+        timeRangeSeconds: now - hoursAgo,
+        timeRangeHours: (now - hoursAgo) / 3600,
+      });
+
+      // Test the count method
+      const swapCount = await this.subgraphService['getSwapCount'](
+        hoursAgo,
+        now,
+      );
+
+      // Test the actual data fetching
+      const allSwaps = await this.subgraphService.getSwapsInPool(hoursAgo, now);
+
+      // Analyze the timestamps
+      const timestamps = allSwaps
+        .map((swap) => parseInt(swap.blockTimestamp))
+        .sort((a, b) => a - b);
+
+      const result = {
+        timeRange: {
+          requestedHours: hours,
+          startTime: new Date(hoursAgo * 1000).toISOString(),
+          endTime: new Date(now * 1000).toISOString(),
+          timeRangeSeconds: now - hoursAgo,
+          timeRangeHours: (now - hoursAgo) / 3600,
+        },
+        swapCount: {
+          estimated: swapCount,
+          actual: allSwaps.length,
+          difference: allSwaps.length - swapCount,
+        },
+        timestampAnalysis: {
+          totalSwaps: timestamps.length,
+          earliestSwap:
+            timestamps.length > 0
+              ? new Date(timestamps[0] * 1000).toISOString()
+              : 'N/A',
+          latestSwap:
+            timestamps.length > 0
+              ? new Date(timestamps[timestamps.length - 1] * 1000).toISOString()
+              : 'N/A',
+          earliestExpected: new Date(hoursAgo * 1000).toISOString(),
+          latestExpected: new Date(now * 1000).toISOString(),
+        },
+        validation: {
+          allSwapsInRange: timestamps.every((ts) => ts >= hoursAgo && ts < now),
+          earliestSwapValid:
+            timestamps.length === 0 || timestamps[0] >= hoursAgo,
+          latestSwapValid:
+            timestamps.length === 0 || timestamps[timestamps.length - 1] < now,
+        },
+        sampleSwaps: allSwaps.slice(0, 5).map((swap) => ({
+          id: swap.id,
+          timestamp: new Date(
+            parseInt(swap.blockTimestamp) * 1000,
+          ).toISOString(),
+          amount0: swap.amount0,
+          amount1: swap.amount1,
+          tick: swap.tick,
+        })),
+      };
+
+      console.log('=== TIME BOUNDARY TEST RESULTS ===');
+      console.log(JSON.stringify(result, null, 2));
+
+      return result;
+    } catch (error) {
+      console.error('Error testing time boundaries:', error);
+      return {
+        error: error.message,
+        hours,
+        timestamp: new Date().toISOString(),
       };
     }
   }
@@ -1643,14 +2042,45 @@ export class AerodromeFeeOptimiserRebalancingCronService
     position: any,
     volumeThreshold: number, // e.g. 50, 60, 65
     tickDistanceThreshold: number = 145, // default, but can be changed per scenario
+    highVolumeData?: {
+      isHighVolume: boolean;
+      isExtraHighVolume: boolean;
+      reason: string;
+    }, // Pass from parent function
   ): Promise<{ shouldRebalance: boolean; optimalRange?: any }> {
     const tickRange = position.metadata?.tickRange;
     if (!tickRange) return { shouldRebalance: false };
     const tickLower = tickRange.tickLower;
     const tickUpper = tickRange.tickUpper;
 
-    // Get volume data for last 2 hours
-    const volumeData = await this.getLast2HoursVolumeData(tickLower, tickUpper);
+    // Use passed high volume data or fetch if not provided
+    const highVolumeCheck =
+      highVolumeData || (await this.checkHighVolumePeriod());
+
+    // Determine analysis timeframe based on volume conditions
+    let analysisHours: number;
+    let volumeCondition: string;
+    if (highVolumeCheck.isExtraHighVolume) {
+      analysisHours = 1; // 1 hour for extra high volume
+      volumeCondition = 'EXTRA HIGH VOLUME';
+    } else if (highVolumeCheck.isHighVolume) {
+      analysisHours = 1.5; // 1.5 hours for high volume
+      volumeCondition = 'HIGH VOLUME';
+    } else {
+      analysisHours = 2; // 2 hours for normal volume
+      volumeCondition = 'NORMAL';
+    }
+
+    console.log(
+      `📊 Market analysis using ${analysisHours}-hour data (${volumeCondition} period)`,
+    );
+
+    // Get volume data for appropriate timeframe
+    const volumeData = await this.getVolumeDataForHours(
+      analysisHours,
+      tickLower,
+      tickUpper,
+    );
     if (volumeData.allSwaps.length === 0) return { shouldRebalance: false };
 
     // Calculate USD volumes
@@ -1664,15 +2094,24 @@ export class AerodromeFeeOptimiserRebalancingCronService
     const volumeCapturePercentage =
       totalPoolUsd > 0 ? (rangeTotalUsd / totalPoolUsd) * 100 : 0;
 
-    // If current range is above threshold, no rebalance
-    if (volumeCapturePercentage >= volumeThreshold)
-      return { shouldRebalance: false };
+    // Log current position's volume capture
+    console.log(
+      `📊 Current position volume capture (${analysisHours}h): ${volumeCapturePercentage.toFixed(2)}% vs ${volumeThreshold}% threshold`,
+    );
 
-    // Find optimal range
+    // If current range is above threshold, no rebalance
+    if (volumeCapturePercentage >= volumeThreshold) {
+      console.log(
+        `✅ Current position volume capture (${volumeCapturePercentage.toFixed(2)}%) is above threshold (${volumeThreshold}%) - NO REBALANCING NEEDED`,
+      );
+      return { shouldRebalance: false };
+    }
+
+    // Find optimal range using the same timeframe
     const optimalRange = await this.findOptimalTickRange(
       tickLower,
       tickUpper,
-      2,
+      analysisHours,
     );
     const meetsVolumeThreshold =
       optimalRange.volumeCapturePercentage >= volumeThreshold;
@@ -1683,6 +2122,10 @@ export class AerodromeFeeOptimiserRebalancingCronService
       (optimalRange.optimalTickLower + optimalRange.optimalTickUpper) / 2;
     const distanceFromCurrent = Math.abs(currentTick - optimalRangeCenter);
     const isOptimalRangeTooFar = distanceFromCurrent > tickDistanceThreshold;
+
+    console.log(
+      `📈 Optimal range potential (${analysisHours}h): ${optimalRange.volumeCapturePercentage.toFixed(2)}% capture vs ${volumeThreshold}% threshold`,
+    );
 
     if (!meetsVolumeThreshold) {
       // Optionally store volatility analysis here
@@ -1700,11 +2143,507 @@ export class AerodromeFeeOptimiserRebalancingCronService
       volumeCapturePercentage: optimalRange.volumeCapturePercentage,
       volumeInOptimalRange: optimalRange.volumeInOptimalRange,
       analysisTimestamp: new Date().toISOString(),
+      analysisHours: analysisHours,
       meetsVolumeThreshold: true,
     };
     await this.aerodromePositionModel.findByIdAndUpdate(position._id, {
       metadata: position.metadata,
     });
     return { shouldRebalance: true, optimalRange };
+  }
+
+  /**
+   * Test improved pagination with subgraph service
+   */
+  async testPaginationImproved(
+    hours: number = 8,
+    tickLower?: number,
+    tickUpper?: number,
+  ): Promise<any> {
+    try {
+      console.log('=== Testing Improved Pagination ===');
+      console.log(`Testing improved pagination for ${hours} hours`);
+
+      const endTime = Math.floor(Date.now() / 1000);
+      const startTime = endTime - hours * 60 * 60;
+
+      console.log('Time range:', {
+        start: new Date(startTime * 1000).toISOString(),
+        end: new Date(endTime * 1000).toISOString(),
+        duration: `${hours} hours`,
+      });
+
+      if (tickLower !== undefined && tickUpper !== undefined) {
+        // Test range-specific swaps
+        const swaps = await this.subgraphService.getSwapsInRange(
+          tickLower,
+          tickUpper,
+          startTime,
+          endTime,
+        );
+
+        return {
+          success: true,
+          message: `Fetched ${swaps.length} swaps in range ${tickLower} to ${tickUpper}`,
+          data: {
+            totalSwaps: swaps.length,
+            timeRange: {
+              start: new Date(startTime * 1000).toISOString(),
+              end: new Date(endTime * 1000).toISOString(),
+              duration: `${hours} hours`,
+            },
+            tickRange: {
+              lower: tickLower,
+              upper: tickUpper,
+            },
+            sampleSwaps: swaps.slice(0, 5), // Show first 5 swaps as sample
+          },
+        };
+      } else {
+        // Test all pool swaps
+        const swaps = await this.subgraphService.getSwapsInPool(
+          startTime,
+          endTime,
+        );
+
+        return {
+          success: true,
+          message: `Fetched ${swaps.length} total pool swaps`,
+          data: {
+            totalSwaps: swaps.length,
+            timeRange: {
+              start: new Date(startTime * 1000).toISOString(),
+              end: new Date(endTime * 1000).toISOString(),
+              duration: `${hours} hours`,
+            },
+            sampleSwaps: swaps.slice(0, 5), // Show first 5 swaps as sample
+          },
+        };
+      }
+    } catch (error) {
+      console.error('Error testing improved pagination:', error);
+      return {
+        success: false,
+        message: `Error testing improved pagination: ${error.message}`,
+        error: error.message,
+      };
+    }
+  }
+
+  /**
+   * Collect 2-hour volume data for an entire week
+   * This will run 84 queries (2 hours * 12 periods * 7 days) and export to JSON/CSV
+   */
+  async collectWeeklyVolumeData(
+    startDate?: string, // Optional: ISO string, defaults to 7 days ago
+    exportToFile: boolean = true,
+  ): Promise<any> {
+    try {
+      console.log('=== COLLECTING WEEKLY VOLUME DATA ===');
+
+      // Calculate time range
+      const endTime = Math.floor(Date.now() / 1000);
+      const startTime = startDate
+        ? Math.floor(new Date(startDate).getTime() / 1000)
+        : endTime - 7 * 24 * 60 * 60; // 7 days ago
+
+      const totalDuration = endTime - startTime;
+      const twoHourChunks = Math.ceil(totalDuration / (2 * 60 * 60)); // 2 hours in seconds
+
+      console.log('Data collection parameters:', {
+        startTime: new Date(startTime * 1000).toISOString(),
+        endTime: new Date(endTime * 1000).toISOString(),
+        totalDuration: `${(totalDuration / 3600).toFixed(2)} hours`,
+        twoHourChunks,
+        estimatedQueries: twoHourChunks,
+      });
+
+      const volumeData: any[] = [];
+      let processedChunks = 0;
+      let totalSwaps = 0;
+      let totalVolume = 0;
+
+      // Process each 2-hour chunk
+      for (let i = 0; i < twoHourChunks; i++) {
+        const chunkStart = startTime + i * 2 * 60 * 60;
+        const chunkEnd = Math.min(chunkStart + 2 * 60 * 60, endTime);
+
+        console.log(
+          `Processing chunk ${i + 1}/${twoHourChunks}: ${new Date(chunkStart * 1000).toISOString()} to ${new Date(chunkEnd * 1000).toISOString()}`,
+        );
+
+        try {
+          // Get all swaps for this 2-hour period
+          const swaps = await this.subgraphService.getSwapsInPool(
+            chunkStart,
+            chunkEnd,
+          );
+
+          // Calculate volumes
+          const volumes = this.subgraphService.calculateVolumes(swaps);
+          const wethPrice = await this.aerodromeService.getTokenPrice('WETH');
+
+          // Convert to USD
+          const wethVolumeUsd = (volumes.wethVolume / 1e18) * wethPrice;
+          const usdcVolumeUsd = volumes.usdcVolume / 1e6;
+          const totalVolumeUsd = wethVolumeUsd + usdcVolumeUsd;
+
+          // Create data point
+          const dataPoint = {
+            chunkIndex: i + 1,
+            startTime: new Date(chunkStart * 1000).toISOString(),
+            endTime: new Date(chunkEnd * 1000).toISOString(),
+            startTimestamp: chunkStart,
+            endTimestamp: chunkEnd,
+            swapsCount: swaps.length,
+            wethVolume: volumes.wethVolume,
+            usdcVolume: volumes.usdcVolume,
+            wethVolumeUsd,
+            usdcVolumeUsd,
+            totalVolumeUsd,
+            wethPrice,
+            averageTick: this.subgraphService.calculateAverageTick(swaps),
+            period: this.subgraphService.getPeriodFromTimestamp(chunkStart),
+          };
+
+          volumeData.push(dataPoint);
+          totalSwaps += swaps.length;
+          totalVolume += totalVolumeUsd;
+          processedChunks++;
+
+          console.log(
+            `Chunk ${i + 1} completed: ${swaps.length} swaps, $${totalVolumeUsd.toFixed(2)} volume`,
+          );
+
+          // Add delay to avoid rate limiting
+          await new Promise((resolve) => setTimeout(resolve, 500));
+        } catch (error) {
+          console.error(`Error processing chunk ${i + 1}:`, error);
+          // Add error data point
+          volumeData.push({
+            chunkIndex: i + 1,
+            startTime: new Date(chunkStart * 1000).toISOString(),
+            endTime: new Date(chunkEnd * 1000).toISOString(),
+            startTimestamp: chunkStart,
+            endTimestamp: chunkEnd,
+            swapsCount: 0,
+            wethVolume: 0,
+            usdcVolume: 0,
+            wethVolumeUsd: 0,
+            usdcVolumeUsd: 0,
+            totalVolumeUsd: 0,
+            wethPrice: 0,
+            averageTick: 0,
+            period: this.subgraphService.getPeriodFromTimestamp(chunkStart),
+            error: error.message,
+          });
+        }
+      }
+
+      // Create summary
+      const summary = {
+        collectionInfo: {
+          startTime: new Date(startTime * 1000).toISOString(),
+          endTime: new Date(endTime * 1000).toISOString(),
+          totalDuration: `${(totalDuration / 3600).toFixed(2)} hours`,
+          totalChunks: twoHourChunks,
+          processedChunks,
+          successfulChunks: volumeData.filter((d) => !d.error).length,
+          failedChunks: volumeData.filter((d) => d.error).length,
+        },
+        totals: {
+          totalSwaps,
+          totalVolumeUsd: totalVolume,
+          averageSwapsPerChunk: totalSwaps / processedChunks,
+          averageVolumePerChunk: totalVolume / processedChunks,
+        },
+        periodBreakdown: {
+          morning: {
+            chunks: volumeData.filter((d) => d.period === 'morning').length,
+            totalSwaps: volumeData
+              .filter((d) => d.period === 'morning')
+              .reduce((sum, d) => sum + d.swapsCount, 0),
+            totalVolume: volumeData
+              .filter((d) => d.period === 'morning')
+              .reduce((sum, d) => sum + d.totalVolumeUsd, 0),
+          },
+          afternoon: {
+            chunks: volumeData.filter((d) => d.period === 'afternoon').length,
+            totalSwaps: volumeData
+              .filter((d) => d.period === 'afternoon')
+              .reduce((sum, d) => sum + d.swapsCount, 0),
+            totalVolume: volumeData
+              .filter((d) => d.period === 'afternoon')
+              .reduce((sum, d) => sum + d.totalVolumeUsd, 0),
+          },
+          night: {
+            chunks: volumeData.filter((d) => d.period === 'night').length,
+            totalSwaps: volumeData
+              .filter((d) => d.period === 'night')
+              .reduce((sum, d) => sum + d.swapsCount, 0),
+            totalVolume: volumeData
+              .filter((d) => d.period === 'night')
+              .reduce((sum, d) => sum + d.totalVolumeUsd, 0),
+          },
+        },
+      };
+
+      const result = {
+        success: true,
+        message: `Collected ${processedChunks} chunks of volume data`,
+        summary,
+        data: volumeData,
+      };
+
+      // Export to files if requested
+      if (exportToFile) {
+        await this.exportVolumeDataToFiles(result);
+      }
+
+      return result;
+    } catch (error) {
+      console.error('Error collecting weekly volume data:', error);
+      return {
+        success: false,
+        message: `Error collecting weekly volume data: ${error.message}`,
+        error: error.message,
+      };
+    }
+  }
+
+  /**
+   * Export volume data to JSON and CSV files
+   */
+  private async exportVolumeDataToFiles(data: any): Promise<void> {
+    try {
+      const fs = await import('fs').then((m) => m.promises);
+      const path = await import('path');
+
+      // Create exports directory if it doesn't exist
+      const exportsDir = path.join(process.cwd(), 'exports');
+      try {
+        await fs.mkdir(exportsDir, { recursive: true });
+      } catch {
+        // Directory might already exist
+      }
+
+      const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+
+      // Export JSON
+      const jsonPath = path.join(
+        exportsDir,
+        `weekly-volume-data-${timestamp}.json`,
+      );
+      await fs.writeFile(jsonPath, JSON.stringify(data, null, 2));
+      console.log(`JSON exported to: ${jsonPath}`);
+
+      // Export CSV
+      const csvPath = path.join(
+        exportsDir,
+        `weekly-volume-data-${timestamp}.csv`,
+      );
+      const csvContent = this.convertToCSV(data.data);
+      await fs.writeFile(csvPath, csvContent);
+      console.log(`CSV exported to: ${csvPath}`);
+    } catch (error) {
+      console.error('Error exporting files:', error);
+    }
+  }
+
+  /**
+   * Convert volume data to CSV format
+   */
+  private convertToCSV(data: any[]): string {
+    if (data.length === 0) return '';
+
+    // Define CSV headers
+    const headers = [
+      'chunk_index',
+      'start_time',
+      'end_time',
+      'start_timestamp',
+      'end_timestamp',
+      'swaps_count',
+      'weth_volume',
+      'usdc_volume',
+      'weth_volume_usd',
+      'usdc_volume_usd',
+      'total_volume_usd',
+      'weth_price',
+      'average_tick',
+      'period',
+      'error',
+    ];
+
+    // Create CSV content
+    let csv = headers.join(',') + '\n';
+
+    for (const row of data) {
+      const values = headers.map((header) => {
+        const value = row[header] || '';
+        // Escape commas and quotes in CSV
+        if (
+          typeof value === 'string' &&
+          (value.includes(',') || value.includes('"'))
+        ) {
+          return `"${value.replace(/"/g, '""')}"`;
+        }
+        return value;
+      });
+      csv += values.join(',') + '\n';
+    }
+
+    return csv;
+  }
+
+  /**
+   * Check if current period is high volume based on volume data and time
+   */
+  private async checkHighVolumePeriod(): Promise<{
+    isHighVolume: boolean;
+    isExtraHighVolume: boolean;
+    reason: string;
+    volumeData?: any;
+    timeData?: any;
+  }> {
+    try {
+      const now = new Date();
+      const utcHour = now.getUTCHours();
+
+      // Check time-based conditions (12:00-15:00 UTC or 22:00-23:59 UTC)
+      const isHighVolumeTime =
+        (utcHour >= 12 && utcHour < 15) || // 12:00-15:00 UTC
+        utcHour >= 22; // 22:00-23:59 UTC
+
+      // Get volume data for last 2 hours for both extra high and regular high volume checks
+      const volumeData2Hours = await this.getLast2HoursVolumeData();
+      const wethPrice = await this.aerodromeService.getTokenPrice('WETH');
+
+      // Calculate total USD volume for 2 hours
+      const totalWethUsd2Hours =
+        (volumeData2Hours.totalVolume.wethVolume / 1e18) * wethPrice;
+      const totalUsdcUsd2Hours = volumeData2Hours.totalVolume.usdcVolume / 1e6;
+      const totalVolumeUsd2Hours = totalWethUsd2Hours + totalUsdcUsd2Hours;
+
+      // Check if volume is above 80 million USD (extra high volume) in 2 hours
+      const isExtraHighVolumeAmount = totalVolumeUsd2Hours > 80000000; // 80 million USD
+      // Check if volume is above 65 million USD (regular high volume) in 2 hours
+      const isHighVolumeAmount = totalVolumeUsd2Hours > 65000000; // 65 million USD
+
+      const isHighVolume = isHighVolumeTime || isHighVolumeAmount;
+      const isExtraHighVolume = isExtraHighVolumeAmount;
+
+      const timeData = {
+        utcTime: now.toISOString(),
+        utcHour,
+        isHighVolumeTime,
+        timeReason: isHighVolumeTime
+          ? utcHour >= 12 && utcHour < 15
+            ? '12:00-15:00 UTC high volume period'
+            : '22:00-23:59 UTC high volume period'
+          : 'Not in high volume time period',
+      };
+
+      const volumeAnalysis = {
+        totalVolumeUsd2Hours: totalVolumeUsd2Hours.toFixed(2),
+        wethVolumeUsd2Hours: totalWethUsd2Hours.toFixed(2),
+        usdcVolumeUsd2Hours: totalUsdcUsd2Hours.toFixed(2),
+        isHighVolumeAmount,
+        isExtraHighVolumeAmount,
+        volumeReason: isExtraHighVolumeAmount
+          ? `EXTRA HIGH VOLUME: Volume above 80M USD threshold (${(totalVolumeUsd2Hours / 1000000).toFixed(2)}M USD in 2 hours)`
+          : isHighVolumeAmount
+            ? `Volume above 65M USD threshold (${(totalVolumeUsd2Hours / 1000000).toFixed(2)}M USD in 2 hours)`
+            : `Volume below 65M USD threshold (${(totalVolumeUsd2Hours / 1000000).toFixed(2)}M USD in 2 hours)`,
+      };
+
+      let reason = '';
+      if (isExtraHighVolume) {
+        reason = `EXTRA HIGH VOLUME: ${volumeAnalysis.volumeReason}`;
+      } else if (isHighVolume) {
+        reason = `${isHighVolumeTime ? timeData.timeReason : ''}${isHighVolumeTime && isHighVolumeAmount ? ' AND ' : ''}${isHighVolumeAmount ? volumeAnalysis.volumeReason : ''}`;
+      } else {
+        reason = 'Neither time nor volume conditions met';
+      }
+
+      console.log('🔍 High Volume Period Analysis:', {
+        isHighVolume,
+        isExtraHighVolume,
+        reason,
+        timeData,
+        volumeAnalysis,
+      });
+
+      return {
+        isHighVolume,
+        isExtraHighVolume,
+        reason,
+        volumeData: volumeAnalysis,
+        timeData,
+      };
+    } catch (error) {
+      console.error('❌ Error checking high volume period:', error);
+      return {
+        isHighVolume: false,
+        isExtraHighVolume: false,
+        reason: 'Error occurred while checking high volume period',
+      };
+    }
+  }
+
+  /**
+   * Get dynamic rebalancing thresholds based on current market conditions
+   */
+  private async getDynamicRebalancingThresholds(): Promise<{
+    rebalanceThreshold: number; // 0.3% normal, 0.15% high volume, 0.15% extra high volume
+    noFeesThreshold: number; // 2 hours normal, 1 hour high volume, 1 hour extra high volume
+    feeLeakThreshold: number; // 30% normal, 45% high volume, 45% extra high volume
+    optimalRangeThreshold: number; // 65% normal, 60% high volume, 55% extra high volume
+    isHighVolume: boolean;
+    isExtraHighVolume: boolean;
+    reason: string;
+  }> {
+    const highVolumeCheck = await this.checkHighVolumePeriod();
+
+    if (highVolumeCheck.isExtraHighVolume) {
+      console.log(
+        '🚀🚀 EXTRA HIGH VOLUME PERIOD DETECTED - Using ultra-aggressive rebalancing conditions',
+      );
+      return {
+        rebalanceThreshold: 0.0015, // 0.15%
+        noFeesThreshold: 1.0, // 1 hour
+        feeLeakThreshold: 45, // 45%
+        optimalRangeThreshold: 55, // 55% - reduced for extra high volume
+        isHighVolume: true,
+        isExtraHighVolume: true,
+        reason: highVolumeCheck.reason,
+      };
+    } else if (highVolumeCheck.isHighVolume) {
+      console.log(
+        '🚀 HIGH VOLUME PERIOD DETECTED - Using relaxed rebalancing conditions',
+      );
+      return {
+        rebalanceThreshold: 0.0015, // 0.15%
+        noFeesThreshold: 1.0, // 1 hour
+        feeLeakThreshold: 45, // 45%
+        optimalRangeThreshold: 60, // 60%
+        isHighVolume: true,
+        isExtraHighVolume: false,
+        reason: highVolumeCheck.reason,
+      };
+    } else {
+      console.log(
+        '📉 NORMAL VOLUME PERIOD - Using standard rebalancing conditions',
+      );
+      return {
+        rebalanceThreshold: 0.003, // 0.3%
+        noFeesThreshold: 2.0, // 2 hours
+        feeLeakThreshold: 30, // 30%
+        optimalRangeThreshold: 65, // 65%
+        isHighVolume: false,
+        isExtraHighVolume: false,
+        reason: highVolumeCheck.reason,
+      };
+    }
   }
 }

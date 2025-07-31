@@ -26,6 +26,10 @@ import {
   VolumeBlock,
   VolumeBlockSchema,
 } from './aerodrome/schemas/volume-block.schema';
+import {
+  DailyFees,
+  DailyFeesSchema,
+} from './aerodrome/schemas/daily-fees.schema';
 
 @Module({
   imports: [
@@ -40,6 +44,7 @@ import {
       { name: PendingTip.name, schema: PendingTipSchema },
       { name: AerodromePosition.name, schema: AerodromePositionSchema },
       { name: VolumeBlock.name, schema: VolumeBlockSchema },
+      { name: DailyFees.name, schema: DailyFeesSchema },
     ]),
     JwtModule.register({
       global: true,

@@ -7,6 +7,7 @@ import {
   AerodromePosition,
   AerodromePositionDocument,
 } from './schemas/aerodrome-position.schema';
+import { DailyFees, DailyFeesDocument } from './schemas/daily-fees.schema';
 import { AppService } from '../app.service';
 import { getPoolConfig, isValidPool, PoolConfig } from './config/pools.config';
 import { ConfigService } from '@nestjs/config';
@@ -140,6 +141,8 @@ export class AerodromeService {
   constructor(
     @InjectModel(AerodromePosition.name)
     private aerodromePositionModel: Model<AerodromePositionDocument>,
+    @InjectModel(DailyFees.name)
+    private dailyFeesModel: Model<DailyFeesDocument>,
     private appService: AppService,
     private configService: ConfigService,
   ) {}
@@ -644,6 +647,25 @@ export class AerodromeService {
     }
     // If no colon found, assume it's already an address
     return walletLocator;
+  }
+
+  private async getOrCreateDailyFeesDocument(
+    date: string,
+  ): Promise<DailyFeesDocument> {
+    let dailyFees = await this.dailyFeesModel.findOne({ date });
+
+    if (!dailyFees) {
+      dailyFees = await this.dailyFeesModel.create({
+        date,
+        totalUsdValue: 0,
+        positionFees: {},
+        tokenTotals: {},
+        totalPositions: 0,
+        totalCollections: 0,
+      });
+    }
+
+    return dailyFees;
   }
 
   async mint(createAerodromeLpDto: CreateAerodromeLpDto) {
@@ -2171,11 +2193,60 @@ export class AerodromeService {
         tickUpper,
       });
 
-      console.log('Rounded ticks (with spacing):', {
+      // 5. VALIDATION: Ensure current tick is within the calculated range
+      if (tickCurrent < tickLower || tickCurrent > tickUpper) {
+        console.warn(
+          '⚠️ Current tick is outside calculated range! Adjusting range...',
+        );
+        console.warn('Before adjustment:', {
+          tickCurrent,
+          tickLower,
+          tickUpper,
+          range: tickUpper - tickLower,
+        });
+
+        // Calculate the minimum range needed to include current tick
+        const rangeWidth = tickUpper - tickLower;
+
+        // Adjust range to ensure current tick is included while respecting tick spacing
+        if (tickCurrent < tickLower) {
+          // Current tick is below range, shift range down
+          // Round to nearest valid tick based on tick spacing
+          const newTickLower =
+            Math.round(tickCurrent / tickSpacing) * tickSpacing;
+          const newTickUpper = newTickLower + rangeWidth;
+          tickLower = newTickLower;
+          tickUpper = newTickUpper;
+        } else if (tickCurrent > tickUpper) {
+          // Current tick is above range, shift range up
+          // Round to nearest valid tick based on tick spacing
+          const newTickUpper =
+            Math.round(tickCurrent / tickSpacing) * tickSpacing;
+          const newTickLower = newTickUpper - rangeWidth;
+          tickUpper = newTickUpper;
+          tickLower = newTickLower;
+        }
+
+        // Recalculate prices for the adjusted ticks
+        lowerPrice = Math.exp(tickLower * LOG_BASE);
+        upperPrice = Math.exp(tickUpper * LOG_BASE);
+
+        console.warn('After adjustment:', {
+          tickCurrent,
+          tickLower,
+          tickUpper,
+          range: tickUpper - tickLower,
+          lowerPrice,
+          upperPrice,
+        });
+      }
+
+      console.log('Final ticks (with validation):', {
         tickCurrent,
         tickLower,
         tickUpper,
         tickSpacing,
+        isCurrentInRange: tickCurrent >= tickLower && tickCurrent <= tickUpper,
       });
 
       return {
@@ -3421,96 +3492,101 @@ export class AerodromeService {
         collected1: collected1.toString(),
       });
 
-      // === APR CALCULATION ===
+      // === SHARED PRICE FETCHING AND CALCULATIONS ===
       let apr = 0;
       let totalFeesUSD = 0;
+      let token0Price: number | null = null;
+      let token1Price: number | null = null;
+      let poolConfig: PoolConfig | null = null;
 
-      // Only calculate APR if not skipping
-      if (!skipAprCalculation) {
-        if (
-          position &&
-          position.pool &&
-          position.usdcAmount &&
-          (position as any).createdAt
-        ) {
+      // Get pool configuration and token prices (shared between APR and daily tracking)
+      if (position && position.pool) {
+        poolConfig = getPoolConfig(position.pool);
+        if (poolConfig) {
+          try {
+            // Fetch token prices once - will be used for both APR and daily tracking
+            token0Price = await this.getTokenPrice(poolConfig.token0Name);
+            token1Price = await this.getTokenPrice(poolConfig.token1Name);
+
+            console.log('Token prices fetched:', {
+              token0Name: poolConfig.token0Name,
+              token1Name: poolConfig.token1Name,
+              token0Price,
+              token1Price,
+            });
+          } catch (error) {
+            console.error('Error fetching token prices:', error);
+            // Continue without prices - both APR and daily tracking will be skipped
+          }
+        } else {
+          console.warn(`Pool config not found for pool ${position.pool}`);
+        }
+      }
+
+      // === APR CALCULATION ===
+      if (
+        !skipAprCalculation &&
+        poolConfig &&
+        token0Price !== null &&
+        token1Price !== null
+      ) {
+        if (position.usdcAmount && (position as any).createdAt) {
           try {
             console.log('=== Calculating APR ===');
-            // Get pool configuration to determine token names and decimals
-            const poolConfig = getPoolConfig(position.pool);
-            if (!poolConfig) {
-              console.warn(
-                `Pool config not found for pool ${position.pool}, skipping APR calculation`,
-              );
-            } else {
-              // Get current token prices
-              const token0Price = await this.getTokenPrice(
-                poolConfig.token0Name,
-              );
-              const token1Price = await this.getTokenPrice(
-                poolConfig.token1Name,
-              );
 
-              console.log('Token prices for APR calculation:', {
-                token0Name: poolConfig.token0Name,
-                token1Name: poolConfig.token1Name,
-                token0Price,
-                token1Price,
-              });
+            // Convert cumulative fees to human-readable amounts
+            const new0Human =
+              Number(new0) / Math.pow(10, poolConfig.token0Decimals);
+            const new1Human =
+              Number(new1) / Math.pow(10, poolConfig.token1Decimals);
 
-              // Convert cumulative fees to human-readable amounts
-              const new0Human =
-                Number(new0) / Math.pow(10, poolConfig.token0Decimals);
-              const new1Human =
-                Number(new1) / Math.pow(10, poolConfig.token1Decimals);
+            console.log('Cumulative fees in human amounts:', {
+              token0: new0Human,
+              token1: new1Human,
+              token0Decimals: poolConfig.token0Decimals,
+              token1Decimals: poolConfig.token1Decimals,
+            });
 
-              console.log('Cumulative fees in human amounts:', {
-                token0: new0Human,
-                token1: new1Human,
-                token0Decimals: poolConfig.token0Decimals,
-                token1Decimals: poolConfig.token1Decimals,
-              });
+            // Calculate total fees in USD
+            const token0FeesUSD = new0Human * token0Price;
+            const token1FeesUSD = new1Human * token1Price;
+            totalFeesUSD = token0FeesUSD + token1FeesUSD;
 
-              // Calculate total fees in USD
-              const token0FeesUSD = new0Human * token0Price;
-              const token1FeesUSD = new1Human * token1Price;
-              totalFeesUSD = token0FeesUSD + token1FeesUSD;
+            console.log('Fees in USD:', {
+              token0FeesUSD,
+              token1FeesUSD,
+              totalFeesUSD,
+            });
 
-              console.log('Fees in USD:', {
-                token0FeesUSD,
-                token1FeesUSD,
+            // Calculate time elapsed since position creation
+            const createdAt = new Date((position as any).createdAt);
+            const now = new Date();
+            const timeElapsedMs = now.getTime() - createdAt.getTime();
+            const timeElapsedYears =
+              timeElapsedMs / (1000 * 60 * 60 * 24 * 365.25); // Convert to years
+
+            console.log('Time calculation:', {
+              createdAt: createdAt.toISOString(),
+              now: now.toISOString(),
+              timeElapsedMs,
+              timeElapsedYears,
+            });
+
+            // Calculate APR: (Total Fees USD / Original Investment USD) / Time in Years
+            if (timeElapsedYears > 0 && position.usdcAmount > 0) {
+              apr = totalFeesUSD / position.usdcAmount / timeElapsedYears;
+              apr = apr * 100; // Convert to percentage
+
+              console.log('APR calculation:', {
                 totalFeesUSD,
-              });
-
-              // Calculate time elapsed since position creation
-              const createdAt = new Date((position as any).createdAt);
-              const now = new Date();
-              const timeElapsedMs = now.getTime() - createdAt.getTime();
-              const timeElapsedYears =
-                timeElapsedMs / (1000 * 60 * 60 * 24 * 365.25); // Convert to years
-
-              console.log('Time calculation:', {
-                createdAt: createdAt.toISOString(),
-                now: now.toISOString(),
-                timeElapsedMs,
+                originalInvestment: position.usdcAmount,
                 timeElapsedYears,
+                apr: `${apr.toFixed(2)}%`,
               });
-
-              // Calculate APR: (Total Fees USD / Original Investment USD) / Time in Years
-              if (timeElapsedYears > 0 && position.usdcAmount > 0) {
-                apr = totalFeesUSD / position.usdcAmount / timeElapsedYears;
-                apr = apr * 100; // Convert to percentage
-
-                console.log('APR calculation:', {
-                  totalFeesUSD,
-                  originalInvestment: position.usdcAmount,
-                  timeElapsedYears,
-                  apr: `${apr.toFixed(2)}%`,
-                });
-              } else {
-                console.log(
-                  'Cannot calculate APR: insufficient time elapsed or zero investment',
-                );
-              }
+            } else {
+              console.log(
+                'Cannot calculate APR: insufficient time elapsed or zero investment',
+              );
             }
           } catch (error) {
             console.error('Error calculating APR:', error);
@@ -3530,6 +3606,115 @@ export class AerodromeService {
         updateData['collectedFees.apr'] = apr;
         updateData['collectedFees.lastAprUpdate'] = new Date().toISOString();
         updateData['collectedFees.totalFeesUSD'] = totalFeesUSD;
+      }
+
+      // === DAILY FEE TRACKING ===
+      // Only track daily fees if this is NOT a burn operation (skipAprCalculation = true indicates burn)
+      if (feesActuallyEarned && !skipAprCalculation) {
+        try {
+          console.log('=== Updating Daily Fee Tracking ===');
+
+          // Get current UTC date in YYYY-MM-DD format
+          const currentDate = new Date().toISOString().split('T')[0];
+          console.log('Current UTC date for daily tracking:', currentDate);
+
+          // Get or create daily fees document
+          const dailyFeesDoc =
+            await this.getOrCreateDailyFeesDocument(currentDate);
+
+          // Get pool configuration for token addresses and symbols
+          const poolConfig = getPoolConfig(position.pool);
+          if (!poolConfig) {
+            console.warn(
+              `Pool config not found for pool ${position.pool}, skipping daily fee tracking`,
+            );
+          } else {
+            // Calculate USD value of collected fees
+            const token0Price = await this.getTokenPrice(poolConfig.token0Name);
+            const token1Price = await this.getTokenPrice(poolConfig.token1Name);
+
+            const token0Human =
+              Number(collected0) / Math.pow(10, poolConfig.token0Decimals);
+            const token1Human =
+              Number(collected1) / Math.pow(10, poolConfig.token1Decimals);
+
+            const token0UsdValue = token0Human * token0Price;
+            const token1UsdValue = token1Human * token1Price;
+            const totalUsdValue = token0UsdValue + token1UsdValue;
+
+            console.log('Daily fee calculation:', {
+              token0: {
+                symbol: poolConfig.token0Name,
+                amount: token0Human,
+                usdValue: token0UsdValue,
+              },
+              token1: {
+                symbol: poolConfig.token1Name,
+                amount: token1Human,
+                usdValue: token1UsdValue,
+              },
+              totalUsdValue,
+            });
+
+            // Update daily fees document
+            const updateOperations: any = {
+              $inc: {
+                totalUsdValue: totalUsdValue,
+                totalCollections: 1,
+              },
+            };
+
+            // Add position-specific fees
+            updateOperations.$set = {
+              [`positionFees.${tokenId}`]: {
+                token0: collected0.toString(),
+                token1: collected1.toString(),
+                usdValue: totalUsdValue,
+                walletLocator: walletLocator,
+                pool: position.pool,
+                timestamp: new Date(),
+              },
+            };
+
+            // Update token totals
+            if (collected0 > 0n) {
+              updateOperations.$inc[`tokenTotals.${poolConfig.token0}.amount`] =
+                Number(collected0);
+              updateOperations.$inc[
+                `tokenTotals.${poolConfig.token0}.usdValue`
+              ] = token0UsdValue;
+              updateOperations.$set[`tokenTotals.${poolConfig.token0}.symbol`] =
+                poolConfig.token0Name;
+            }
+
+            if (collected1 > 0n) {
+              updateOperations.$inc[`tokenTotals.${poolConfig.token1}.amount`] =
+                Number(collected1);
+              updateOperations.$inc[
+                `tokenTotals.${poolConfig.token1}.usdValue`
+              ] = token1UsdValue;
+              updateOperations.$set[`tokenTotals.${poolConfig.token1}.symbol`] =
+                poolConfig.token1Name;
+            }
+
+            // Increment total positions if this is a new position for the day
+            if (!dailyFeesDoc.positionFees[tokenId]) {
+              updateOperations.$inc.totalPositions = 1;
+            }
+
+            // Update the daily fees document
+            await this.dailyFeesModel.findOneAndUpdate(
+              { date: currentDate },
+              updateOperations,
+              { upsert: true },
+            );
+
+            console.log('✅ Daily fee tracking updated successfully');
+          }
+        } catch (error) {
+          console.error('Error updating daily fee tracking:', error);
+          // Continue with the function even if daily tracking fails
+        }
       }
 
       // Update lastActualEarning timestamp only if fees were actually earned
@@ -6557,6 +6742,160 @@ export class AerodromeService {
           priceAdjustedValue: 0,
           actualValue: 0,
         },
+      };
+    }
+  }
+
+  // === DAILY FEE STATISTICS METHODS ===
+
+  async getDailyFeesStats(date?: string) {
+    try {
+      const targetDate = date || new Date().toISOString().split('T')[0];
+
+      const dailyFees = await this.dailyFeesModel.findOne({ date: targetDate });
+
+      if (!dailyFees) {
+        return {
+          success: true,
+          message: `No fee data found for ${targetDate}`,
+          date: targetDate,
+          stats: {
+            totalUsdValue: 0,
+            totalPositions: 0,
+            totalCollections: 0,
+            positionFees: {},
+            tokenTotals: {},
+          },
+        };
+      }
+
+      return {
+        success: true,
+        message: `Daily fee statistics for ${targetDate}`,
+        date: targetDate,
+        stats: {
+          totalUsdValue: dailyFees.totalUsdValue,
+          totalPositions: dailyFees.totalPositions,
+          totalCollections: dailyFees.totalCollections,
+          positionFees: dailyFees.positionFees,
+          tokenTotals: dailyFees.tokenTotals,
+        },
+      };
+    } catch (error) {
+      console.error('Error getting daily fees stats:', error);
+      return {
+        success: false,
+        message: `Error getting daily fees stats: ${error.message}`,
+        date: date || new Date().toISOString().split('T')[0],
+        stats: null,
+      };
+    }
+  }
+
+  async getDailyFeesRange(startDate: string, endDate: string) {
+    try {
+      const dailyFees = await this.dailyFeesModel
+        .find({
+          date: { $gte: startDate, $lte: endDate },
+        })
+        .sort({ date: 1 });
+
+      const totalStats = {
+        totalUsdValue: 0,
+        totalPositions: 0,
+        totalCollections: 0,
+        tokenTotals: {} as any,
+        dailyBreakdown: [] as any[],
+      };
+
+      for (const day of dailyFees) {
+        totalStats.totalUsdValue += day.totalUsdValue;
+        totalStats.totalPositions += day.totalPositions;
+        totalStats.totalCollections += day.totalCollections;
+
+        // Aggregate token totals
+        for (const [tokenAddress, tokenData] of Object.entries(
+          day.tokenTotals,
+        )) {
+          if (!totalStats.tokenTotals[tokenAddress]) {
+            totalStats.tokenTotals[tokenAddress] = {
+              symbol: tokenData.symbol,
+              amount: '0',
+              usdValue: 0,
+            };
+          }
+          totalStats.tokenTotals[tokenAddress].amount = (
+            BigInt(totalStats.tokenTotals[tokenAddress].amount) +
+            BigInt(tokenData.amount)
+          ).toString();
+          totalStats.tokenTotals[tokenAddress].usdValue += tokenData.usdValue;
+        }
+
+        totalStats.dailyBreakdown.push({
+          date: day.date,
+          totalUsdValue: day.totalUsdValue,
+          totalPositions: day.totalPositions,
+          totalCollections: day.totalCollections,
+          tokenTotals: day.tokenTotals,
+        });
+      }
+
+      return {
+        success: true,
+        message: `Fee statistics for range ${startDate} to ${endDate}`,
+        dateRange: { startDate, endDate },
+        totalStats,
+        dailyBreakdown: totalStats.dailyBreakdown,
+      };
+    } catch (error) {
+      console.error('Error getting daily fees range:', error);
+      return {
+        success: false,
+        message: `Error getting daily fees range: ${error.message}`,
+        dateRange: { startDate, endDate },
+        totalStats: null,
+        dailyBreakdown: [],
+      };
+    }
+  }
+
+  async getTopEarningPositions(date?: string, limit: number = 10) {
+    try {
+      const targetDate = date || new Date().toISOString().split('T')[0];
+
+      const dailyFees = await this.dailyFeesModel.findOne({ date: targetDate });
+
+      if (!dailyFees || Object.keys(dailyFees.positionFees).length === 0) {
+        return {
+          success: true,
+          message: `No position fee data found for ${targetDate}`,
+          date: targetDate,
+          topPositions: [],
+        };
+      }
+
+      // Convert position fees to array and sort by USD value
+      const positionArray = Object.entries(dailyFees.positionFees)
+        .map(([positionId, data]) => ({
+          positionId,
+          ...data,
+        }))
+        .sort((a, b) => b.usdValue - a.usdValue)
+        .slice(0, limit);
+
+      return {
+        success: true,
+        message: `Top ${limit} earning positions for ${targetDate}`,
+        date: targetDate,
+        topPositions: positionArray,
+      };
+    } catch (error) {
+      console.error('Error getting top earning positions:', error);
+      return {
+        success: false,
+        message: `Error getting top earning positions: ${error.message}`,
+        date: date || new Date().toISOString().split('T')[0],
+        topPositions: [],
       };
     }
   }

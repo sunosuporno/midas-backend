@@ -268,9 +268,9 @@ export class AerodromeController {
     @Query('positionId') positionId?: string,
     @Query('tickLower') tickLower?: string,
     @Query('tickUpper') tickUpper?: string,
-    @Query('hours') hours: string = '2',
+    @Query('hours') hours?: string,
   ) {
-    const hoursCount = parseInt(hours, 10);
+    const hoursCount = hours ? parseInt(hours, 10) : undefined;
 
     if (positionId) {
       // Test with a specific position
@@ -335,5 +335,120 @@ export class AerodromeController {
       positionId1,
       positionId2,
     );
+  }
+
+  @Public()
+  @Get('test/time-boundaries')
+  async testTimeBoundaries(@Query('hours') hours: string = '2') {
+    const hoursCount = parseInt(hours, 10);
+    return this.feeOptimiserRebalancingCronService.testTimeBoundaries(
+      hoursCount,
+    );
+  }
+
+  @Public()
+  @Get('test/pagination-improved')
+  async testPaginationImproved(
+    @Query('hours') hours: string = '8',
+    @Query('tickLower') tickLower?: string,
+    @Query('tickUpper') tickUpper?: string,
+  ) {
+    const parsedHours = parseFloat(hours);
+    const parsedTickLower = tickLower ? parseFloat(tickLower) : undefined;
+    const parsedTickUpper = tickUpper ? parseFloat(tickUpper) : undefined;
+
+    if (isNaN(parsedHours) || parsedHours <= 0) {
+      throw new Error('Invalid hours');
+    }
+
+    return this.feeOptimiserRebalancingCronService.testPaginationImproved(
+      parsedHours,
+      parsedTickLower,
+      parsedTickUpper,
+    );
+  }
+
+  @Public()
+  @Get('collect-weekly-volume-data')
+  async collectWeeklyVolumeData(
+    @Query('startDate') startDate?: string,
+    @Query('exportToFile') exportToFile: string = 'true',
+  ) {
+    const shouldExport = exportToFile.toLowerCase() === 'true';
+
+    console.log('Starting weekly volume data collection...');
+    console.log('Parameters:', { startDate, exportToFile: shouldExport });
+
+    return this.feeOptimiserRebalancingCronService.collectWeeklyVolumeData(
+      startDate,
+      shouldExport,
+    );
+  }
+
+  @Public()
+  @Get('test/dynamic-rebalancing-conditions')
+  async testDynamicRebalancingConditions() {
+    console.log('Testing dynamic rebalancing conditions...');
+
+    const highVolumeCheck =
+      await this.feeOptimiserRebalancingCronService['checkHighVolumePeriod']();
+    const dynamicThresholds =
+      await this.feeOptimiserRebalancingCronService[
+        'getDynamicRebalancingThresholds'
+      ]();
+
+    return {
+      highVolumeCheck,
+      dynamicThresholds,
+      summary: {
+        isHighVolume: dynamicThresholds.isHighVolume,
+        isExtraHighVolume: dynamicThresholds.isExtraHighVolume,
+        reason: dynamicThresholds.reason,
+        thresholds: {
+          rebalanceThreshold: `${(dynamicThresholds.rebalanceThreshold * 100).toFixed(2)}%`,
+          noFeesThreshold: `${dynamicThresholds.noFeesThreshold} hours`,
+          feeLeakThreshold: `${dynamicThresholds.feeLeakThreshold}%`,
+          optimalRangeThreshold: `${dynamicThresholds.optimalRangeThreshold}%`,
+        },
+        explanation: dynamicThresholds.isExtraHighVolume
+          ? 'Extra high volume period detected - using ultra-aggressive rebalancing conditions'
+          : dynamicThresholds.isHighVolume
+            ? 'High volume period detected - using relaxed rebalancing conditions'
+            : 'Normal volume period - using standard rebalancing conditions',
+      },
+    };
+  }
+
+  // === DAILY FEE TRACKING ENDPOINTS ===
+
+  @Public()
+  @Get('daily-fees/stats')
+  async getDailyFeesStats(@Query('date') date?: string) {
+    return this.aerodromeService.getDailyFeesStats(date);
+  }
+
+  @Public()
+  @Get('daily-fees/range')
+  async getDailyFeesRange(
+    @Query('startDate') startDate: string,
+    @Query('endDate') endDate: string,
+  ) {
+    if (!startDate || !endDate) {
+      throw new Error('Both startDate and endDate are required');
+    }
+    return this.aerodromeService.getDailyFeesRange(startDate, endDate);
+  }
+
+  @Public()
+  @Get('daily-fees/top-positions')
+  async getTopEarningPositions(
+    @Query('date') date?: string,
+    @Query('limit') limit: string = '10',
+  ) {
+    const parsedLimit = parseInt(limit, 10);
+    if (isNaN(parsedLimit) || parsedLimit <= 0) {
+      throw new Error('Invalid limit value');
+    }
+    return this.aerodromeService.getTopEarningPositions(date, parsedLimit);
   }
 }
