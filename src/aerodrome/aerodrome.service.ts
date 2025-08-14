@@ -138,6 +138,16 @@ export class AerodromeService {
   private readonly NON_FUNGIBLE_POSITION_MANAGER_ADDRESS =
     '0x827922686190790b37229fd06084350E74485b72';
 
+  // Transaction retry configuration
+  private readonly TRANSACTION_RETRY_CONFIG = {
+    maxRetries: 3, // Maximum number of retries
+    initialPollAttempts: 30, // Initial 30 seconds
+    extendedPollAttempts: 60, // Extended 60 seconds for retries
+    pollInterval: 1000, // 1 second between polls
+    retryDelayBase: 5000, // Base delay between retries (5 seconds)
+    maxRetryDelay: 15000, // Maximum delay between retries (15 seconds)
+  };
+
   constructor(
     @InjectModel(AerodromePosition.name)
     private aerodromePositionModel: Model<AerodromePositionDocument>,
@@ -325,13 +335,23 @@ export class AerodromeService {
     return data;
   }
 
+  async get0xPriceForEndpoint(
+    sellToken: string,
+    buyToken: string,
+    sellAmount: string,
+  ) {
+    // Use a dummy wallet address for price queries
+    const dummyWalletAddress = '0xF2de711e43409f64aD848449612Ba4069DE418E5';
+    return this.get0xPrice(sellToken, buyToken, sellAmount, dummyWalletAddress);
+  }
+
   private async get0xPrice(
     sellToken: string,
     buyToken: string,
     sellAmount: string,
     walletAddress: string,
-    slippageBps: number = 30, // 0.3% default slippage
   ) {
+    const slippageBps = 30; // Fixed 0.3% slippage
     console.log('Getting 0x price with parameters:', {
       sellToken,
       buyToken,
@@ -361,8 +381,8 @@ export class AerodromeService {
     buyToken: string,
     sellAmount: string,
     walletAddress: string,
-    slippageBps: number = 30, // 0.3% default slippage
   ) {
+    const slippageBps = 30; // Fixed 0.3% slippage
     console.log('Getting 0x quote with parameters:', {
       sellToken,
       buyToken,
@@ -454,29 +474,63 @@ export class AerodromeService {
       throw new HttpException('WALLET_SIGNER_SECRET_KEY not configured', 500);
     }
 
+    // Helper function to retry axios calls for 502 errors
+    const retryAxiosCall = async (
+      axiosCall: () => Promise<any>,
+      operation: string,
+    ) => {
+      let retryCount = 0;
+      const maxRetries = 3;
+
+      while (retryCount < maxRetries) {
+        try {
+          return await axiosCall();
+        } catch (error) {
+          // Only retry for 502 errors (infrastructure issues)
+          if (error.response?.status === 502 && retryCount < maxRetries - 1) {
+            retryCount++;
+            const waitTime = Math.min(
+              2000 * Math.pow(2, retryCount - 1),
+              10000,
+            );
+            console.log(
+              `502 error in ${operation}, retrying in ${waitTime}ms (attempt ${retryCount}/${maxRetries})`,
+            );
+            await new Promise((resolve) => setTimeout(resolve, waitTime));
+            continue;
+          }
+          throw error; // Re-throw other errors or after max retries
+        }
+      }
+    };
+
     // Step 1: Create the transaction
     console.log('Step 1: Creating transaction...');
-    const createResponse = await axios.post(
-      `https://www.crossmint.com/api/2022-06-09/wallets/${walletLocator}/transactions`,
-      {
-        params: {
-          calls: [
-            {
-              to: contractAddress,
-              value: value,
-              data: data,
+    const createResponse = await retryAxiosCall(
+      () =>
+        axios.post(
+          `https://www.crossmint.com/api/2022-06-09/wallets/${walletLocator}/transactions`,
+          {
+            params: {
+              calls: [
+                {
+                  to: contractAddress,
+                  value: value,
+                  data: data,
+                },
+              ],
+              chain: 'base',
+              signer: signerWallet,
             },
-          ],
-          chain: 'base',
-          signer: signerWallet,
-        },
-      },
-      {
-        headers: {
-          'Content-Type': 'application/json',
-          'X-API-KEY': apiKey,
-        },
-      },
+          },
+          {
+            headers: {
+              'Content-Type': 'application/json',
+              'X-API-KEY': apiKey,
+            },
+          },
+        ),
+      'transaction creation',
     );
     const transactionId = createResponse.data.id;
     let status = createResponse.data.status;
@@ -532,71 +586,156 @@ export class AerodromeService {
 
       // Step 3: Approve the transaction
       console.log('Step 3: Approving transaction...');
-      const approveResponse = await axios.post(
-        `https://www.crossmint.com/api/2022-06-09/wallets/${walletLocator}/transactions/${transactionId}/approvals`,
-        {
-          approvals: [
+      const approveResponse = await retryAxiosCall(
+        () =>
+          axios.post(
+            `https://www.crossmint.com/api/2022-06-09/wallets/${walletLocator}/transactions/${transactionId}/approvals`,
             {
-              signer: signerWallet,
-              signature: signature,
+              approvals: [
+                {
+                  signer: signerWallet,
+                  signature: signature,
+                },
+              ],
             },
-          ],
-        },
-        {
-          headers: {
-            'Content-Type': 'application/json',
-            'X-API-KEY': apiKey,
-          },
-        },
+            {
+              headers: {
+                'Content-Type': 'application/json',
+                'X-API-KEY': apiKey,
+              },
+            },
+          ),
+        'transaction approval',
       );
 
       status = approveResponse.data.status;
     }
 
-    // Step 4: Poll for completion
-    console.log('Step 4: Polling for transaction completion...');
+    // Step 4: Poll for completion with retry logic
+    console.log(
+      'Step 4: Polling for transaction completion with retry logic...',
+    );
     let finalStatus = status;
-    let attempts = 0;
-    const maxAttempts = 30; // 30 seconds max wait time
+    let totalAttempts = 0;
+    let retryCount = 0;
+    const config = this.TRANSACTION_RETRY_CONFIG;
 
-    while (
-      attempts < maxAttempts &&
-      (finalStatus === 'pending' || finalStatus === 'awaiting-approval')
-    ) {
-      await new Promise((resolve) => setTimeout(resolve, 1000)); // Wait 1 second
+    while (retryCount <= config.maxRetries) {
+      const currentMaxAttempts =
+        retryCount === 0
+          ? config.initialPollAttempts
+          : config.extendedPollAttempts;
+      let attempts = 0;
 
-      try {
-        const statusResponse = await axios.get(
-          `https://www.crossmint.com/api/2022-06-09/wallets/${walletLocator}/transactions/${transactionId}`,
-          {
-            headers: {
-              'X-API-KEY': apiKey,
-              'Content-Type': 'application/json',
-            },
-          },
+      console.log(
+        `Retry ${retryCount + 1}/${config.maxRetries + 1}: Polling for ${currentMaxAttempts} seconds...`,
+      );
+
+      while (
+        attempts < currentMaxAttempts &&
+        (finalStatus === 'pending' || finalStatus === 'awaiting-approval')
+      ) {
+        await new Promise((resolve) =>
+          setTimeout(resolve, config.pollInterval),
         );
 
-        finalStatus = statusResponse.data.status;
-        console.log(`Poll attempt ${attempts + 1}: Status = ${finalStatus}`);
+        try {
+          const statusResponse = await retryAxiosCall(
+            () =>
+              axios.get(
+                `https://www.crossmint.com/api/2022-06-09/wallets/${walletLocator}/transactions/${transactionId}`,
+                {
+                  headers: {
+                    'X-API-KEY': apiKey,
+                    'Content-Type': 'application/json',
+                  },
+                },
+              ),
+            'status polling',
+          );
 
-        if (finalStatus === 'completed' || finalStatus === 'success') {
-          console.log('Transaction completed successfully!');
-          return {
-            id: transactionId,
-            status: finalStatus,
-            transactionHash:
+          finalStatus = statusResponse.data.status;
+          totalAttempts++;
+          console.log(
+            `Poll attempt ${totalAttempts} (retry ${retryCount + 1}): Status = ${finalStatus}`,
+          );
+
+          if (finalStatus === 'completed' || finalStatus === 'success') {
+            const txHash =
               statusResponse.data.onChain?.txId ||
-              statusResponse.data.transactionHash,
-          };
+              statusResponse.data.transactionHash;
+            console.log('✅ Transaction completed successfully!', {
+              transactionId,
+              transactionHash: txHash,
+              status: finalStatus,
+              totalAttempts,
+              retryCount,
+            });
+            return {
+              id: transactionId,
+              status: finalStatus,
+              transactionHash: txHash,
+            };
+          } else if (finalStatus === 'failed' || finalStatus === 'error') {
+            console.error(`❌ Transaction failed with status: ${finalStatus}`, {
+              transactionId,
+              error: statusResponse.data.error || 'Unknown error',
+            });
+            throw new Error(
+              `Transaction failed with status: ${finalStatus}. Error: ${statusResponse.data.error || 'Unknown error'}`,
+            );
+          }
+        } catch (error) {
+          console.error(
+            `Error polling transaction status (attempt ${totalAttempts}):`,
+            error,
+          );
         }
-      } catch (error) {
-        console.error(`Error polling transaction status:`, error);
+
+        attempts++;
       }
 
-      attempts++;
+      // If we've exhausted the current retry's attempts and still pending
+      if (finalStatus === 'pending' || finalStatus === 'awaiting-approval') {
+        retryCount++;
+
+        if (retryCount <= config.maxRetries) {
+          console.log(
+            `⚠️ Transaction still pending after ${currentMaxAttempts} seconds. Retrying... (${retryCount}/${config.maxRetries})`,
+          );
+
+          // Wait a bit longer between retries (exponential backoff)
+          const retryDelay = Math.min(
+            config.retryDelayBase * retryCount,
+            config.maxRetryDelay,
+          );
+          console.log(`Waiting ${retryDelay}ms before retry ${retryCount}...`);
+          await new Promise((resolve) => setTimeout(resolve, retryDelay));
+        } else {
+          console.error(
+            `❌ Transaction timed out after ${config.maxRetries + 1} attempts. Final status: ${finalStatus}`,
+          );
+          throw new Error(
+            `Transaction timed out after ${config.maxRetries + 1} attempts (${totalAttempts} total polls). Final status: ${finalStatus}. Transaction ID: ${transactionId}`,
+          );
+        }
+      } else {
+        // Transaction is no longer pending (either completed, failed, or error)
+        break;
+      }
     }
 
-    // Return final status even if not completed
+    // Final check - if we get here, something went wrong
+    if (finalStatus !== 'completed' && finalStatus !== 'success') {
+      console.error(
+        `Transaction did not complete successfully. Final status: ${finalStatus}`,
+      );
+      throw new Error(
+        `Transaction did not complete successfully. Final status: ${finalStatus}. Transaction ID: ${transactionId}`,
+      );
+    }
+
+    // This should never be reached, but just in case
     return {
       id: transactionId,
       status: finalStatus,
@@ -675,6 +814,11 @@ export class AerodromeService {
     let amount0Used = null;
     let amount1Used = null;
     let mintResult: any = null;
+    // Track swap outcomes for dynamic approvals in normal mint mode
+    let token0DidSwap = false;
+    let token1DidSwap = false;
+    let token0BuyAmount: string | null = null;
+    let token1BuyAmount: string | null = null;
 
     console.log('=== Creating Aerodrome LP Position ===');
     console.log('Wallet Locator:', createAerodromeLpDto.walletLocator);
@@ -764,19 +908,85 @@ export class AerodromeService {
         const requiredToken0Amount = BigInt(storedAmounts.token0);
         const requiredToken1Amount = BigInt(storedAmounts.token1);
 
-        if (token0BalanceBigInt < requiredToken0Amount) {
+        // If we don't have enough balance, wait and retry the balance check
+        // This handles the case where fees were just collected but balance hasn't updated yet
+        let retryCount = 0;
+        const maxRetries = 3;
+        let finalToken0Balance = token0BalanceBigInt;
+        let finalToken1Balance = token1BalanceBigInt;
+
+        while (
+          (finalToken0Balance < requiredToken0Amount ||
+            finalToken1Balance < requiredToken1Amount) &&
+          retryCount < maxRetries
+        ) {
+          retryCount++;
+          console.log(`Balance check attempt ${retryCount}/${maxRetries}:`);
+          console.log(
+            `Token0: Required ${requiredToken0Amount}, Available ${finalToken0Balance}`,
+          );
+          console.log(
+            `Token1: Required ${requiredToken1Amount}, Available ${finalToken1Balance}`,
+          );
+
+          if (retryCount < maxRetries) {
+            // Wait for balance to update (exponential backoff)
+            const waitTime = Math.min(
+              2000 * Math.pow(2, retryCount - 1),
+              10000,
+            );
+            console.log(`Waiting ${waitTime}ms for balance to update...`);
+            await new Promise((resolve) => setTimeout(resolve, waitTime));
+
+            // Refresh balances
+            const [newToken0Balance, newToken1Balance] = await Promise.all([
+              this.readContract(
+                poolConfig.token0,
+                ERC20_ABI as unknown as any[],
+                'balanceOf',
+                [walletAddress],
+              ),
+              this.readContract(
+                poolConfig.token1,
+                ERC20_ABI as unknown as any[],
+                'balanceOf',
+                [walletAddress],
+              ),
+            ]);
+
+            finalToken0Balance = BigInt(newToken0Balance);
+            finalToken1Balance = BigInt(newToken1Balance);
+
+            console.log('Refreshed balances:', {
+              token0: finalToken0Balance.toString(),
+              token1: finalToken1Balance.toString(),
+            });
+          }
+        }
+
+        // Final balance check with 1% tolerance
+        const onePercentToken0 = requiredToken0Amount / 100n;
+        const onePercentToken1 = requiredToken1Amount / 100n;
+
+        if (finalToken0Balance < requiredToken0Amount - onePercentToken0) {
           throw new HttpException(
-            `Insufficient ${poolConfig.token0Name} balance for retry. Required: ${requiredToken0Amount}, Available: ${token0BalanceBigInt}`,
+            `Insufficient ${poolConfig.token0Name} balance for retry after ${maxRetries} attempts. Required: ${requiredToken0Amount}, Available: ${finalToken0Balance}, Tolerance: ${onePercentToken0}`,
             400,
           );
         }
 
-        if (token1BalanceBigInt < requiredToken1Amount) {
+        if (finalToken1Balance < requiredToken1Amount - onePercentToken1) {
           throw new HttpException(
-            `Insufficient ${poolConfig.token1Name} balance for retry. Required: ${requiredToken1Amount}, Available: ${token1BalanceBigInt}`,
+            `Insufficient ${poolConfig.token1Name} balance for retry after ${maxRetries} attempts. Required: ${requiredToken1Amount}, Available: ${finalToken1Balance}, Tolerance: ${onePercentToken1}`,
             400,
           );
         }
+
+        console.log(
+          '✅ Final balance check passed after',
+          retryCount,
+          'attempts',
+        );
       }
 
       console.log('✅ Sufficient token balances for retry/rebalancing');
@@ -850,7 +1060,7 @@ export class AerodromeService {
 
       console.log('Calculated tick range for LP:', tickRange);
 
-      // Handle fee-optimiser strategy: calculate configurable rebalance tick range
+      // Handle fee-optimiser strategies: calculate configurable rebalance tick range
       let tickRangeRebalance = null;
 
       if (createAerodromeLpDto.strategyName === 'fee-optimiser') {
@@ -870,6 +1080,13 @@ export class AerodromeService {
           rebalanceRange,
           tickRangeRebalance,
         });
+      } else if (createAerodromeLpDto.strategyName === 'fee-optimiser-v2') {
+        console.log(
+          `=== FEE-OPTIMISER-V2 STRATEGY: Using simplified timer-based approach ===`,
+        );
+        console.log(
+          'Fee-optimiser-v2: No rebalance range needed - uses timer-based logic',
+        );
       }
 
       // Calculate liquidity amounts and determine limiting token
@@ -914,6 +1131,11 @@ export class AerodromeService {
             rebalanceRange: createAerodromeLpDto.rebalanceRange || 3.0,
             tickRangeRebalance,
           }),
+          // Fee-optimiser-v2 specific data
+          ...(createAerodromeLpDto.strategyName === 'fee-optimiser-v2' &&
+            {
+              // No rebalanceRange needed for v2 - uses simplified timer-based approach
+            }),
           tokenAmounts: {
             token0Amount: tokenAmounts.token0Amount,
             token1Amount: tokenAmounts.token1Amount,
@@ -975,14 +1197,15 @@ export class AerodromeService {
             token0AmountHuman * token0Price * Math.pow(10, this.USDC_DECIMALS),
           );
           // Use the new swapTokens helper
-          const { txResult } = await this.swapTokens(
+          const { buyAmount, txResult } = await this.swapTokens(
             createAerodromeLpDto.walletLocator,
             this.USDC_ADDRESS,
             poolConfig.token0,
             sellAmountUSDC.toString(),
-            slippageBps,
           );
           token0SwapResult = txResult;
+          token0BuyAmount = buyAmount;
+          token0DidSwap = true;
         } else {
           console.log('Token0 is USDC, no swap needed');
         }
@@ -997,14 +1220,15 @@ export class AerodromeService {
           const sellAmountUSDC = Math.ceil(
             token1AmountHuman * token1Price * Math.pow(10, this.USDC_DECIMALS),
           );
-          const { txResult } = await this.swapTokens(
+          const { buyAmount, txResult } = await this.swapTokens(
             createAerodromeLpDto.walletLocator,
             this.USDC_ADDRESS,
             poolConfig.token1,
             sellAmountUSDC.toString(),
-            slippageBps,
           );
           token1SwapResult = txResult;
+          token1BuyAmount = buyAmount;
+          token1DidSwap = true;
         } else {
           console.log('Token1 is USDC, no swap needed');
         }
@@ -1025,7 +1249,7 @@ export class AerodromeService {
             : null,
         };
 
-        // Set amounts used for normal mode
+        // Set amounts used placeholder; final amounts will be set from approvals below
         amount0Used = BigInt(liquidityAmounts.usedAmounts.token0.rawAmount);
         amount1Used = BigInt(liquidityAmounts.usedAmounts.token1.rawAmount);
       }
@@ -1044,32 +1268,24 @@ export class AerodromeService {
       // Step 5.5: Approve tokens for NonFungiblePositionManager before minting
       // Check and approve token0
       console.log('Approving token0 for NonFungiblePositionManager');
-      let approveAmount0 = BigInt(
-        liquidityAmounts.usedAmounts.token0.rawAmount,
-      );
-      console.log('approveAmount0', approveAmount0);
       const token0BalanceRaw = await this.readContract(
         poolConfig.token0,
         ERC20_ABI as unknown as any[],
         'balanceOf',
         [walletAddress],
       );
-      //decode tokenbalance
       const token0Balance = BigInt(token0BalanceRaw);
-      if (token0Balance < approveAmount0) {
-        const onePercent = approveAmount0 / 100n;
-        if (token0Balance >= approveAmount0 - onePercent) {
-          console.log(
-            'Token0 balance is within 1% of required amount, approving available balance',
-          );
-          approveAmount0 = token0Balance;
-        } else {
-          throw new HttpException(
-            `Insufficient token0 balance for mint: required ${approveAmount0}, available ${token0Balance}`,
-            400,
-          );
-        }
+      // Determine approve amount for token0 based on actual swap output (if swapped),
+      // otherwise use desired amount, capped by current balance
+      let approveAmount0: bigint;
+      if (token0DidSwap && token0BuyAmount) {
+        const swapped0 = BigInt(token0BuyAmount);
+        approveAmount0 = swapped0 <= token0Balance ? swapped0 : token0Balance;
+      } else {
+        const desired0 = BigInt(liquidityAmounts.usedAmounts.token0.rawAmount);
+        approveAmount0 = desired0 <= token0Balance ? desired0 : token0Balance;
       }
+      console.log('approveAmount0 (final)', approveAmount0.toString());
 
       await this.handleTokenApproval(
         createAerodromeLpDto.walletLocator,
@@ -1079,9 +1295,6 @@ export class AerodromeService {
       );
       // Check and approve token1
       console.log('Approving token1 for NonFungiblePositionManager');
-      let approveAmount1 = BigInt(
-        liquidityAmounts.usedAmounts.token1.rawAmount,
-      );
       const token1BalanceRaw = await this.readContract(
         poolConfig.token1,
         ERC20_ABI as unknown as any[],
@@ -1089,20 +1302,15 @@ export class AerodromeService {
         [walletAddress],
       );
       const token1Balance = BigInt(token1BalanceRaw);
-      if (token1Balance < approveAmount1) {
-        const onePercent = approveAmount1 / 100n;
-        if (token1Balance >= approveAmount1 - onePercent) {
-          console.log(
-            'Token1 balance is within 1% of required amount, approving available balance',
-          );
-          approveAmount1 = token1Balance;
-        } else {
-          throw new HttpException(
-            `Insufficient token1 balance for mint: required ${approveAmount1}, available ${token1Balance}`,
-            400,
-          );
-        }
+      let approveAmount1: bigint;
+      if (token1DidSwap && token1BuyAmount) {
+        const swapped1 = BigInt(token1BuyAmount);
+        approveAmount1 = swapped1 <= token1Balance ? swapped1 : token1Balance;
+      } else {
+        const desired1 = BigInt(liquidityAmounts.usedAmounts.token1.rawAmount);
+        approveAmount1 = desired1 <= token1Balance ? desired1 : token1Balance;
       }
+      console.log('approveAmount1 (final)', approveAmount1.toString());
 
       await this.handleTokenApproval(
         createAerodromeLpDto.walletLocator,
@@ -1145,18 +1353,41 @@ export class AerodromeService {
         sqrtPriceX96: 0,
       };
 
-      // Calculate minimum amounts with 10% slippage tolerance
-      const slippageTolerance = 0.1; // 10% slippage tolerance
-      const amount0Min =
-        (BigInt(amount0Used) *
-          BigInt(Math.floor((1 - slippageTolerance) * 1000))) /
-        BigInt(1000);
-      const amount1Min =
-        (BigInt(amount1Used) *
-          BigInt(Math.floor((1 - slippageTolerance) * 1000))) /
-        BigInt(1000);
+      // Calculate minimum amounts based on strategy
+      let slippageTolerance = 0; // Default: no slippage protection
+      let strategyNote =
+        'No slippage protection - allowing maximum flexibility';
 
-      console.log('Attempting mint with 10% slippage tolerance...');
+      if (createAerodromeLpDto.strategyName === 'fee-optimiser') {
+        slippageTolerance = 0.1; // 10% slippage tolerance for fee-optimiser
+        strategyNote =
+          'Protecting against excessive slippage while allowing reasonable market movement';
+      }
+      // fee-optimiser-v2 and vanilla strategies (no strategyName) use 0% slippage
+
+      // Calculate minimum amounts based on slippage tolerance
+      let amount0Min: bigint;
+      let amount1Min: bigint;
+
+      if (slippageTolerance === 0) {
+        // 0% slippage tolerance means no minimum protection - accept any amount
+        amount0Min = BigInt(0);
+        amount1Min = BigInt(0);
+      } else {
+        // Apply slippage tolerance calculation
+        amount0Min =
+          (BigInt(amount0Used) *
+            BigInt(Math.floor((1 - slippageTolerance) * 1000))) /
+          BigInt(1000);
+        amount1Min =
+          (BigInt(amount1Used) *
+            BigInt(Math.floor((1 - slippageTolerance) * 1000))) /
+          BigInt(1000);
+      }
+
+      console.log(
+        `Attempting mint with ${(slippageTolerance * 100).toFixed(0)}% slippage tolerance...`,
+      );
 
       const mintParams = {
         ...baseMintParams,
@@ -1164,14 +1395,18 @@ export class AerodromeService {
         amount1Min: amount1Min.toString(),
       };
 
-      console.log('Mint params with 10% slippage tolerance:', {
-        amount0Desired: amount0Used.toString(),
-        amount1Desired: amount1Used.toString(),
-        amount0Min: amount0Min.toString(),
-        amount1Min: amount1Min.toString(),
-        slippageTolerance: '10%',
-        note: 'Protecting against excessive slippage while allowing reasonable market movement',
-      });
+      console.log(
+        `Mint params with ${(slippageTolerance * 100).toFixed(0)}% slippage tolerance:`,
+        {
+          amount0Desired: amount0Used.toString(),
+          amount1Desired: amount1Used.toString(),
+          amount0Min: amount0Min.toString(),
+          amount1Min: amount1Min.toString(),
+          slippageTolerance: `${(slippageTolerance * 100).toFixed(0)}%`,
+          strategyName: createAerodromeLpDto.strategyName || 'vanilla',
+          note: strategyNote,
+        },
+      );
 
       mintResult = await this.sendTransaction(
         createAerodromeLpDto.walletLocator,
@@ -1186,7 +1421,10 @@ export class AerodromeService {
         mintResult.status === 'completed' ||
         mintResult.status === 'success'
       ) {
-        console.log('Mint successful with 10% slippage tolerance:', mintResult);
+        console.log(
+          `Mint successful with ${(slippageTolerance * 100).toFixed(0)}% slippage tolerance:`,
+          mintResult,
+        );
       } else {
         // Transaction was sent but failed on-chain
         throw new Error(`Transaction failed with status: ${mintResult.status}`);
@@ -1573,18 +1811,13 @@ export class AerodromeService {
     }
   }
 
-  async getSwapQuote(
-    walletLocator: string,
-    pool: string,
-    usdcAmount: number,
-    slippageBps: number = 30, // 0.3% default slippage
-  ) {
+  async getSwapQuote(walletLocator: string, pool: string, usdcAmount: number) {
     try {
       console.log('=== Getting Swap Quote ===');
       console.log('Wallet Locator:', walletLocator);
       console.log('Pool:', pool);
       console.log('USDC Amount:', usdcAmount);
-      console.log('Slippage (bps):', slippageBps);
+      console.log('Slippage (bps): 30 (0.3%)');
 
       // Validate pool exists
       if (!isValidPool(pool)) {
@@ -1627,7 +1860,6 @@ export class AerodromeService {
           poolConfig.token0, // First token in pool
           usdcAmountInBaseUnits,
           walletAddress,
-          slippageBps,
         );
 
         if (poolConfig.token0 !== poolConfig.token1) {
@@ -1636,7 +1868,6 @@ export class AerodromeService {
             poolConfig.token1, // Second token in pool
             usdcAmountInBaseUnits,
             walletAddress,
-            slippageBps,
           );
         }
         quoteSource = '0x';
@@ -1646,7 +1877,7 @@ export class AerodromeService {
         try {
           // Fall back to 1inch
           console.log('Getting quotes from 1inch...');
-          const slippagePercent = slippageBps / 100;
+          const slippagePercent = 0.3; // Fixed 0.3% slippage
 
           token0Price = await this.get1inchSwapQuote(
             poolConfig.token1, // USDC
@@ -1727,7 +1958,6 @@ export class AerodromeService {
           fee: poolConfig.fee,
         },
         usdcAmount,
-        slippageBps,
         quoteSource,
         quotes: {
           token0: formatQuote(
@@ -1879,7 +2109,6 @@ export class AerodromeService {
           poolConfig.token0,
           poolConfig.token1,
           sellAmountToken0.toString(),
-          100, // 1% slippage
         );
 
         swapResults.token0Swap = {
@@ -1910,7 +2139,6 @@ export class AerodromeService {
           poolConfig.token1,
           poolConfig.token0,
           sellAmountToken1.toString(),
-          100, // 1% slippage
         );
 
         swapResults.token1Swap = {
@@ -2487,6 +2715,7 @@ export class AerodromeService {
         throw new HttpException('Pool config not found', 404);
       }
       const walletAddress = this.getWalletAddressFromLocator(walletLocator);
+
       // Note collectedFees before
       const prevCollectedFees = position.collectedFees || {
         token0: '0',
@@ -2511,83 +2740,7 @@ export class AerodromeService {
         ).toFixed(6),
       });
 
-      // Get current liquidity on-chain
-      const onChainPositionRaw = await this.readContract(
-        this.NON_FUNGIBLE_POSITION_MANAGER_ADDRESS,
-        NonFungiblePositionManagerAbi as unknown as any[],
-        'positions',
-        [tokenId],
-      );
-      const { decodeFunctionResult } = await import('viem');
-      const decoded = decodeFunctionResult({
-        abi: NonFungiblePositionManagerAbi as any,
-        functionName: 'positions',
-        data: onChainPositionRaw,
-      });
-      const liquidity = BigInt(decoded[7]);
-
-      console.log('=== BURN FUNCTION: Liquidity Check ===');
-      console.log('On-chain Liquidity:', liquidity.toString());
-      console.log('Liquidity is zero:', liquidity === 0n);
-
-      if (!liquidity || liquidity === 0n) {
-        // If liquidity is already 0, just burn the NFT
-        const burnResult = await this.sendTransaction(
-          walletLocator,
-          this.NON_FUNGIBLE_POSITION_MANAGER_ADDRESS,
-          NonFungiblePositionManagerAbi as unknown as any[],
-          'burn',
-          [tokenId],
-        );
-        await this.aerodromePositionModel.findOneAndUpdate(
-          { 'metadata.mintDetails.tokenId': tokenId.toString() },
-          {
-            status: 'closed',
-            metadata: {
-              ...position.metadata,
-              burn: {
-                decreaseLiquidityTx: null,
-                burnTx: burnResult?.transactionHash,
-                timestamp: new Date().toISOString(),
-              },
-            },
-          },
-        );
-
-        return {
-          message: 'Position had zero liquidity and was burned successfully',
-          tokenId,
-          decreaseLiquidityTx: null,
-          burnTx: burnResult?.transactionHash,
-        };
-      }
-
-      // 2. Remove all liquidity
-      console.log('=== BURN FUNCTION: Removing Liquidity ===');
-      console.log('Decreasing liquidity by:', liquidity.toString());
-
-      const decreaseParams = {
-        tokenId: BigInt(tokenId),
-        liquidity: BigInt(liquidity),
-        amount0Min: 0,
-        amount1Min: 0,
-        deadline: Math.floor(Date.now() / 1000) + 1800,
-      };
-      console.log('Decrease params:', {
-        tokenId: decreaseParams.tokenId.toString(),
-        liquidity: decreaseParams.liquidity.toString(),
-        deadline: new Date(decreaseParams.deadline * 1000).toISOString(),
-      });
-
-      const decreaseResult = await this.sendTransaction(
-        walletLocator,
-        this.NON_FUNGIBLE_POSITION_MANAGER_ADDRESS,
-        NonFungiblePositionManagerAbi as unknown as any[],
-        'decreaseLiquidity',
-        [decreaseParams],
-      );
-
-      // 3. Get token0 and token1 balances before collecting fees
+      // 6. Get token0 and token1 balances before collecting fees (for accounting)
       console.log('=== BURN FUNCTION: Pre-Collect Balance Check ===');
       console.log('Wallet Address:', walletAddress);
       console.log('Token0 Address:', poolConfig.token0);
@@ -2625,75 +2778,357 @@ export class AerodromeService {
         },
       });
 
-      // 4. Collect fees
-      console.log('=== BURN FUNCTION: Collecting Fees ===');
-      console.log('Calling collectFees with skipAprCalculation: true');
+      // Variables to track operations
+      let decreaseLiquidityTx = null;
+      let collectFeesTx = null;
+      let totalCollectedToken0 = 0n;
+      let totalCollectedToken1 = 0n;
+      let iterationCount = 0;
+      const maxIterations = 5; // Safety limit
 
-      const collectFeesResult = await this.collectFees(
-        walletLocator,
-        tokenId,
-        true,
-      );
+      // Loop until both liquidity and tokensOwed are 0
+      while (iterationCount < maxIterations) {
+        iterationCount++;
+        console.log(`=== BURN FUNCTION: Iteration ${iterationCount} ===`);
 
-      console.log('Collect fees result:', {
-        transactionHash: collectFeesResult?.transactionHash,
-        success: !!collectFeesResult?.transactionHash,
-        collectedAmounts: collectFeesResult?.collected,
-      });
+        // Get current position state on-chain
+        const onChainPositionRaw = await this.readContract(
+          this.NON_FUNGIBLE_POSITION_MANAGER_ADDRESS,
+          NonFungiblePositionManagerAbi as unknown as any[],
+          'positions',
+          [tokenId],
+        );
+        const { decodeFunctionResult } = await import('viem');
+        const decoded = decodeFunctionResult({
+          abi: NonFungiblePositionManagerAbi as any,
+          functionName: 'positions',
+          data: onChainPositionRaw,
+        });
+        const liquidity = BigInt(decoded[7]);
+        const tokensOwed0 = BigInt(decoded[10]);
+        const tokensOwed1 = BigInt(decoded[11]);
 
-      // Get the exact amounts from the Collect event
-      const collectedFromEvent = collectFeesResult?.collected || {
-        token0: '0',
-        token1: '0',
-      };
-      const collectedToken0 = BigInt(collectedFromEvent.token0);
-      const collectedToken1 = BigInt(collectedFromEvent.token1);
+        console.log('=== BURN FUNCTION: Position State Check ===');
+        console.log('On-chain Liquidity:', liquidity.toString());
+        console.log('On-chain TokensOwed0:', tokensOwed0.toString());
+        console.log('On-chain TokensOwed1:', tokensOwed1.toString());
+        console.log('Liquidity is zero:', liquidity === 0n);
+        console.log(
+          'TokensOwed are zero:',
+          tokensOwed0 === 0n && tokensOwed1 === 0n,
+        );
 
-      console.log('=== BURN FUNCTION: Collect Event Analysis ===');
-      console.log('Amounts from Collect event:', {
-        token0: {
-          raw: collectedToken0.toString(),
-          human: (
-            Number(collectedToken0) / Math.pow(10, poolConfig.token0Decimals)
-          ).toFixed(6),
-        },
-        token1: {
-          raw: collectedToken1.toString(),
-          human: (
-            Number(collectedToken1) / Math.pow(10, poolConfig.token1Decimals)
-          ).toFixed(6),
-        },
-      });
+        // Check if we can proceed to burn (both liquidity and tokensOwed must be 0)
+        if (liquidity === 0n && tokensOwed0 === 0n && tokensOwed1 === 0n) {
+          console.log(
+            '✅ Position ready for burn - both liquidity and tokensOwed are 0',
+          );
+          break;
+        }
 
-      // 5. Burn the NFT
+        // If liquidity is 0 but there are tokensOwed, collect fees
+        if (liquidity === 0n && (tokensOwed0 > 0n || tokensOwed1 > 0n)) {
+          console.log(
+            '=== BURN FUNCTION: Collecting Fees (liquidity=0, tokensOwed>0) ===',
+          );
+
+          let collectFeesResult = null;
+          let collectRetryCount = 0;
+          const maxCollectRetries = 3;
+
+          while (collectRetryCount < maxCollectRetries) {
+            try {
+              collectFeesResult = await this.collectFees(
+                walletLocator,
+                tokenId,
+                true,
+              );
+
+              if (collectFeesResult && collectFeesResult.transactionHash) {
+                break; // Success, exit retry loop
+              }
+            } catch (error) {
+              collectRetryCount++;
+              console.log(
+                `Collect fees attempt ${collectRetryCount} failed:`,
+                error.message,
+              );
+
+              if (collectRetryCount >= maxCollectRetries) {
+                throw new Error(
+                  `CollectFees transaction failed after ${maxCollectRetries} attempts. Last error: ${error.message}`,
+                );
+              }
+
+              // Wait before retry (exponential backoff)
+              const waitTime = Math.min(
+                2000 * Math.pow(2, collectRetryCount - 1),
+                10000,
+              );
+              console.log(`Retrying collect fees in ${waitTime}ms...`);
+              await new Promise((resolve) => setTimeout(resolve, waitTime));
+            }
+          }
+
+          if (!collectFeesResult || !collectFeesResult.transactionHash) {
+            throw new Error(
+              `CollectFees transaction failed. Result: ${JSON.stringify(collectFeesResult)}`,
+            );
+          }
+
+          collectFeesTx = collectFeesResult.transactionHash;
+          console.log('✅ CollectFees transaction succeeded:', {
+            transactionHash: collectFeesResult.transactionHash,
+            collectedAmounts: collectFeesResult?.collected,
+            attempts: collectRetryCount + 1,
+          });
+
+          // Add to total collected amounts
+          const collectedFromEvent = collectFeesResult?.collected || {
+            token0: '0',
+            token1: '0',
+          };
+          totalCollectedToken0 += BigInt(collectedFromEvent.token0);
+          totalCollectedToken1 += BigInt(collectedFromEvent.token1);
+
+          console.log('Total collected so far:', {
+            token0: totalCollectedToken0.toString(),
+            token1: totalCollectedToken1.toString(),
+          });
+
+          // Wait a bit before next iteration to allow blockchain state to update
+          await new Promise((resolve) => setTimeout(resolve, 2000));
+          continue;
+        }
+
+        // If liquidity > 0, decrease liquidity first, then collect
+        if (liquidity > 0n) {
+          console.log('=== BURN FUNCTION: Decreasing Liquidity ===');
+          console.log('Decreasing liquidity by:', liquidity.toString());
+
+          const decreaseParams = {
+            tokenId: BigInt(tokenId),
+            liquidity: BigInt(liquidity),
+            amount0Min: 0,
+            amount1Min: 0,
+            deadline: Math.floor(Date.now() / 1000) + 1800,
+          };
+          console.log('Decrease params:', {
+            tokenId: decreaseParams.tokenId.toString(),
+            liquidity: decreaseParams.liquidity.toString(),
+            deadline: new Date(decreaseParams.deadline * 1000).toISOString(),
+          });
+
+          const decreaseResult = await this.sendTransaction(
+            walletLocator,
+            this.NON_FUNGIBLE_POSITION_MANAGER_ADDRESS,
+            NonFungiblePositionManagerAbi as unknown as any[],
+            'decreaseLiquidity',
+            [decreaseParams],
+          );
+
+          if (!decreaseResult || !decreaseResult.transactionHash) {
+            throw new Error(
+              `DecreaseLiquidity transaction failed. Result: ${JSON.stringify(decreaseResult)}`,
+            );
+          }
+
+          decreaseLiquidityTx = decreaseResult.transactionHash;
+          console.log('✅ DecreaseLiquidity transaction succeeded:', {
+            transactionHash: decreaseResult.transactionHash,
+            status: decreaseResult.status,
+          });
+
+          // Wait a bit before collecting fees
+          await new Promise((resolve) => setTimeout(resolve, 2000));
+
+          // Now collect fees after decreasing liquidity with retry logic
+          console.log('=== BURN FUNCTION: Collecting Fees After Decrease ===');
+
+          let collectFeesResult = null;
+          let collectRetryCount = 0;
+          const maxCollectRetries = 3;
+
+          while (collectRetryCount < maxCollectRetries) {
+            try {
+              collectFeesResult = await this.collectFees(
+                walletLocator,
+                tokenId,
+                true,
+              );
+
+              if (collectFeesResult && collectFeesResult.transactionHash) {
+                break; // Success, exit retry loop
+              }
+            } catch (error) {
+              collectRetryCount++;
+              console.log(
+                `Collect fees attempt ${collectRetryCount} failed:`,
+                error.message,
+              );
+
+              if (collectRetryCount >= maxCollectRetries) {
+                throw new Error(
+                  `CollectFees transaction failed after ${maxCollectRetries} attempts. Last error: ${error.message}`,
+                );
+              }
+
+              // Wait before retry (exponential backoff)
+              const waitTime = Math.min(
+                2000 * Math.pow(2, collectRetryCount - 1),
+                10000,
+              );
+              console.log(`Retrying collect fees in ${waitTime}ms...`);
+              await new Promise((resolve) => setTimeout(resolve, waitTime));
+            }
+          }
+
+          if (!collectFeesResult || !collectFeesResult.transactionHash) {
+            throw new Error(
+              `CollectFees transaction failed. Result: ${JSON.stringify(collectFeesResult)}`,
+            );
+          }
+
+          collectFeesTx = collectFeesResult.transactionHash;
+          console.log('✅ CollectFees transaction succeeded:', {
+            transactionHash: collectFeesResult.transactionHash,
+            collectedAmounts: collectFeesResult?.collected,
+          });
+
+          // Add to total collected amounts
+          const collectedFromEvent = collectFeesResult?.collected || {
+            token0: '0',
+            token1: '0',
+          };
+          totalCollectedToken0 += BigInt(collectedFromEvent.token0);
+          totalCollectedToken1 += BigInt(collectedFromEvent.token1);
+
+          console.log('Total collected so far:', {
+            token0: totalCollectedToken0.toString(),
+            token1: totalCollectedToken1.toString(),
+          });
+
+          // Wait a bit before next iteration
+          await new Promise((resolve) => setTimeout(resolve, 2000));
+          continue;
+        }
+
+        // If we reach here, something unexpected happened
+        console.log('Unexpected state - liquidity and tokensOwed check failed');
+        break;
+      }
+
+      if (iterationCount >= maxIterations) {
+        throw new Error(
+          `Burn operation exceeded maximum iterations (${maxIterations}). Position may be in an unexpected state.`,
+        );
+      }
+
+      // 5. Burn the NFT (only when both liquidity and tokensOwed are 0)
       console.log('=== BURN FUNCTION: Burning NFT ===');
       console.log('Burning NFT with tokenId:', tokenId);
 
-      const burnResult = await this.sendTransaction(
-        walletLocator,
+      // Final state verification before burn
+      console.log('=== BURN FUNCTION: Final State Verification ===');
+      const finalPositionState = await this.readContract(
         this.NON_FUNGIBLE_POSITION_MANAGER_ADDRESS,
         NonFungiblePositionManagerAbi as unknown as any[],
-        'burn',
+        'positions',
         [tokenId],
       );
-
-      console.log('Burn result:', {
-        transactionHash: burnResult?.transactionHash,
-        success: !!burnResult?.transactionHash,
+      const { decodeFunctionResult } = await import('viem');
+      const finalDecoded = decodeFunctionResult({
+        abi: NonFungiblePositionManagerAbi as any,
+        functionName: 'positions',
+        data: finalPositionState,
+      });
+      console.log('Final position state before burn:', {
+        liquidity: finalDecoded[7].toString(),
+        tokensOwed0: finalDecoded[10].toString(),
+        tokensOwed1: finalDecoded[11].toString(),
+        canBurn:
+          finalDecoded[7] === 0n &&
+          finalDecoded[10] === 0n &&
+          finalDecoded[11] === 0n,
       });
 
-      // 7. Calculate total available funds using exact amounts from Collect event
-      console.log('=== BURN FUNCTION: Fund Calculation Analysis ===');
+      let burnResult = null;
+      let burnRetryCount = 0;
+      const maxBurnRetries = 3;
+
+      while (burnRetryCount < maxBurnRetries) {
+        try {
+          burnResult = await this.sendTransaction(
+            walletLocator,
+            this.NON_FUNGIBLE_POSITION_MANAGER_ADDRESS,
+            NonFungiblePositionManagerAbi as unknown as any[],
+            'burn',
+            [tokenId],
+          );
+
+          if (burnResult && burnResult.transactionHash) {
+            break; // Success, exit retry loop
+          }
+        } catch (error) {
+          burnRetryCount++;
+          console.log(`Burn attempt ${burnRetryCount} failed:`, error.message);
+
+          if (burnRetryCount >= maxBurnRetries) {
+            throw new Error(
+              `Burn transaction failed after ${maxBurnRetries} attempts. Last error: ${error.message}`,
+            );
+          }
+
+          // Wait before retry (exponential backoff)
+          const waitTime = Math.min(
+            3000 * Math.pow(2, burnRetryCount - 1),
+            15000,
+          );
+          console.log(`Retrying burn in ${waitTime}ms...`);
+          await new Promise((resolve) => setTimeout(resolve, waitTime));
+        }
+      }
+
+      // Validate that burn transaction succeeded
+      if (!burnResult || !burnResult.transactionHash) {
+        throw new Error(
+          `Burn transaction failed. Result: ${JSON.stringify(burnResult)}`,
+        );
+      }
+
+      console.log('✅ Burn transaction succeeded:', {
+        transactionHash: burnResult.transactionHash,
+        success: !!burnResult?.transactionHash,
+        attempts: burnRetryCount + 1,
+      });
+
+      // Use the total collected amounts from our loop
+      const actualReceivedToken0 = totalCollectedToken0;
+      const actualReceivedToken1 = totalCollectedToken1;
+
+      console.log('=== BURN FUNCTION: Collect Event Analysis ===');
+      console.log('Total amounts collected during burn process:', {
+        token0: {
+          raw: actualReceivedToken0.toString(),
+          human: (
+            Number(actualReceivedToken0) /
+            Math.pow(10, poolConfig.token0Decimals)
+          ).toFixed(6),
+        },
+        token1: {
+          raw: actualReceivedToken1.toString(),
+          human: (
+            Number(actualReceivedToken1) /
+            Math.pow(10, poolConfig.token1Decimals)
+          ).toFixed(6),
+        },
+      });
 
       // === ACCOUNTING BREAKDOWN ===
       // 1. Withdrawn amount (from collect function): actualReceivedToken0/1
       // 2. Unused amount (from metadata.mintDetails): amount0Unused/amount1Unused
       // 3. Previous fees collected (from collectedFees): prevCollected0/prevCollected1
       // Total Available = Previous Collected Fees + Current Collect + Unused Amounts
-
-      // Use the exact amounts from the Collect event (no balance checks needed)
-      const actualReceivedToken0 = collectedToken0;
-      const actualReceivedToken1 = collectedToken1;
 
       // Add unused amounts from previous mint (if any)
       const prevMintDetails = position.metadata?.mintDetails;
@@ -3082,14 +3517,12 @@ export class AerodromeService {
         });
         let usdcFromToken0 = 0;
         let usdcFromToken1 = 0;
-        const slippageBps = 30; // 0.3% slippage
         if (poolConfig.token0 !== this.USDC_ADDRESS && swapAmountToken0 > 0n) {
           const { buyAmount } = await this.swapTokens(
             walletLocator,
             poolConfig.token0,
             this.USDC_ADDRESS,
             swapAmountToken0.toString(),
-            slippageBps,
           );
           usdcFromToken0 = Number(buyAmount) / Math.pow(10, this.USDC_DECIMALS);
         } else {
@@ -3102,7 +3535,6 @@ export class AerodromeService {
             poolConfig.token1,
             this.USDC_ADDRESS,
             swapAmountToken1.toString(),
-            slippageBps,
           );
           usdcFromToken1 = Number(buyAmount) / Math.pow(10, this.USDC_DECIMALS);
         } else {
@@ -3247,9 +3679,9 @@ export class AerodromeService {
         legacyWithdrawAmountFinal: withdrawAmountFinal.toFixed(6),
       });
       console.log('Transaction hashes:', {
-        decreaseLiquidity: decreaseResult?.transactionHash,
+        decreaseLiquidity: decreaseLiquidityTx,
         burn: burnResult?.transactionHash,
-        collectFees: collectFeesResult?.transactionHash,
+        collectFees: collectFeesTx,
       });
 
       await this.aerodromePositionModel.findOneAndUpdate(
@@ -3259,9 +3691,9 @@ export class AerodromeService {
           metadata: {
             ...position.metadata,
             burn: {
-              decreaseLiquidityTx: decreaseResult?.transactionHash,
+              decreaseLiquidityTx: decreaseLiquidityTx,
               burnTx: burnResult?.transactionHash,
-              collectFeesTx: collectFeesResult?.transactionHash,
+              collectFeesTx: collectFeesTx,
               timestamp: new Date().toISOString(),
             },
             withdrawAmountFinal, // Keep for backward compatibility
@@ -3304,9 +3736,9 @@ export class AerodromeService {
       const result: any = {
         message: 'Position fully closed and burned successfully',
         tokenId,
-        decreaseLiquidityTx: decreaseResult?.transactionHash,
+        decreaseLiquidityTx: decreaseLiquidityTx,
         burnTx: burnResult?.transactionHash,
-        collectFeesTx: collectFeesResult?.transactionHash,
+        collectFeesTx: collectFeesTx,
         totalTokensReceived: {
           token0: (
             prevCollected0 +
@@ -3338,7 +3770,7 @@ export class AerodromeService {
           token0: prevCollected0.toString(),
           token1: prevCollected1.toString(),
         },
-        collectFeesResult,
+        iterations: iterationCount,
       };
 
       // Add token amounts for rebalance if this was a rebalance operation
@@ -3349,6 +3781,7 @@ export class AerodromeService {
       console.log('=== BURN FUNCTION: Summary ===');
       console.log('Burn operation completed successfully');
       console.log('Mode:', isRebalance ? 'REBALANCE' : 'NORMAL');
+      console.log('Iterations required:', iterationCount);
       console.log('Detailed amounts summary:', {
         withdrawAmountUSD: withdrawAmountUSD.toFixed(6),
         feesCollectedUSD: feesCollectedUSD.toFixed(6),
@@ -3374,10 +3807,31 @@ export class AerodromeService {
       return result;
     } catch (error) {
       console.error('Error burning position:', error);
-      throw new HttpException(
-        error.message || 'Failed to burn position',
-        error.status || 500,
-      );
+
+      // Provide more specific error messages based on the error type
+      let errorMessage = error.message || 'Failed to burn position';
+      let errorStatus = error.status || 500;
+
+      if (error.message?.includes('Transaction failed or timed out')) {
+        errorMessage = `Burn operation failed: Transaction timed out or failed. Please check the transaction status manually. ${error.message}`;
+        errorStatus = 408; // Request Timeout
+      } else if (
+        error.message?.includes('DecreaseLiquidity transaction failed')
+      ) {
+        errorMessage = `Burn operation failed: Could not remove liquidity from position. ${error.message}`;
+        errorStatus = 400;
+      } else if (error.message?.includes('CollectFees transaction failed')) {
+        errorMessage = `Burn operation failed: Could not collect fees from position. ${error.message}`;
+        errorStatus = 400;
+      } else if (error.message?.includes('Burn transaction failed')) {
+        errorMessage = `Burn operation failed: Could not burn the NFT position. ${error.message}`;
+        errorStatus = 400;
+      } else if (error.message?.includes('exceeded maximum iterations')) {
+        errorMessage = `Burn operation failed: Position may be in an unexpected state. ${error.message}`;
+        errorStatus = 400;
+      }
+
+      throw new HttpException(errorMessage, errorStatus);
     }
   }
 
@@ -3797,12 +4251,7 @@ export class AerodromeService {
    */
   async rebalancePosition(
     positionId: string,
-    reason:
-      | 'out_of_range'
-      | 'dollar_fees'
-      | 'imbalanced'
-      | 'age_limit'
-      | 'fee_optimiser',
+    reason: 'out_of_range' | 'fee_optimiser',
     strategyName?: string,
   ) {
     return this.rebalancePositionInternal(positionId, reason, strategyName);
@@ -3813,12 +4262,7 @@ export class AerodromeService {
    */
   private async rebalancePositionInternal(
     positionId: string,
-    reason:
-      | 'out_of_range'
-      | 'dollar_fees'
-      | 'imbalanced'
-      | 'age_limit'
-      | 'fee_optimiser',
+    reason: 'out_of_range' | 'fee_optimiser',
     strategyName?: string,
   ) {
     try {
@@ -3875,13 +4319,13 @@ export class AerodromeService {
         collectedFees: position.collectedFees,
       });
 
-      // Step 1: Burn the old position (this will also collect fees)
+      // Step 1: Burn the old position (this will also collect any remaining fees)
       console.log('Step 1: Burning old position...');
       const tokenId = position.metadata?.mintDetails?.tokenId;
       const burnResult = await this.burn(position.walletLocator, tokenId, true); // Pass isRebalance=true
       console.log('Burn result:', burnResult);
 
-      // Step 2: Use the token amounts from burn result for rebalancing
+      // Step 3: Use the token amounts from burn result for rebalancing
       const originalUsdcAmount = position.usdcAmount;
       const totalTokensReceived = burnResult.totalTokensReceived;
 
@@ -3897,8 +4341,8 @@ export class AerodromeService {
         tokenAmountsForRebalance: burnResult.tokenAmountsForRebalance,
       });
 
-      // Step 3: Mint new position with updated amount
-      console.log('Step 3: Minting new position...');
+      // Step 4: Mint new position with updated amount
+      console.log('Step 4: Minting new position...');
 
       // Check if we have optimal range data from fee-optimiser analysis
       const optimalRebalanceRange = position.metadata?.optimalRebalanceRange;
@@ -3974,7 +4418,7 @@ export class AerodromeService {
         );
       }
 
-      // Get rebalanceRange from original position for fee-optimiser strategy
+      // Get rebalanceRange from original position for fee-optimiser strategy (not needed for v2)
       const originalRebalanceRange = position.metadata?.rebalanceRange || 3.0;
 
       const newPositionDto = {
@@ -3984,9 +4428,12 @@ export class AerodromeService {
         description: `Rebalanced position (${reason}) - Original: ${originalUsdcAmount} USDC, New total: ${newUsdcAmount} USDC`,
         rebalancedPositionId: positionId, // Pass the original position ID being rebalanced
         percentDeviation: originalPercentDeviation, // Pass the original percentDeviation
-        rebalanceRange: originalRebalanceRange, // Pass the original rebalanceRange for fee-optimiser
         isRebalanceOrRetry: true, // Add flag for rebalancing flow
         positionId: positionId, // Pass the position ID to get stored token amounts
+        // Add rebalanceRange only for fee-optimiser (not v2)
+        ...(position.metadata?.strategyName === 'fee-optimiser' && {
+          rebalanceRange: originalRebalanceRange,
+        }),
         // Add optimal range data if available
         ...(useOptimalRange && {
           customTickLower: optimalTickLower,
@@ -4016,7 +4463,7 @@ export class AerodromeService {
       const mintResult = await this.mint(mintDto);
       console.log('Mint result:', mintResult);
 
-      // Step 4: Update the original position record with rebalancing info and clear rebalancing flag
+      // Step 5: Update the original position record with rebalancing info and clear rebalancing flag
       await this.aerodromePositionModel.findOneAndUpdate(
         { positionId },
         {
@@ -4103,10 +4550,9 @@ export class AerodromeService {
     sellToken: string,
     buyToken: string,
     sellAmountRaw: string,
-    slippageBps: number = 30, // 0.3% default slippage
   ): Promise<{ buyAmount: string; txResult: any }> {
     const walletAddress = this.getWalletAddressFromLocator(walletLocator);
-    const slippagePercent = slippageBps / 100; // Convert bps to percentage
+    const slippagePercent = 0.3; // Fixed 0.3% slippage
 
     console.log('=== Starting swap with 0x fallback to 1inch ===');
     console.log('Parameters:', {
@@ -4114,27 +4560,46 @@ export class AerodromeService {
       sellToken,
       buyToken,
       sellAmountRaw,
-      slippageBps,
       slippagePercent,
     });
 
-    // Try 0x first
-    try {
-      console.log('Attempting swap with 0x...');
-      return await this.swapWith0x(
-        walletLocator,
-        sellToken,
-        buyToken,
-        sellAmountRaw,
-        slippageBps,
-        walletAddress,
-      );
-    } catch (error) {
-      console.error('0x swap failed, falling back to 1inch:', error);
+    let last0xError = null;
+    let last1inchError = null;
+    const maxSwapRetries = 3;
 
-      // Fall back to 1inch
+    // Try 0x first with retries
+    for (let attempt = 1; attempt <= maxSwapRetries; attempt++) {
       try {
-        console.log('Attempting swap with 1inch...');
+        console.log(
+          `Attempting swap with 0x (attempt ${attempt}/${maxSwapRetries})...`,
+        );
+        return await this.swapWith0x(
+          walletLocator,
+          sellToken,
+          buyToken,
+          sellAmountRaw,
+          walletAddress,
+        );
+      } catch (error) {
+        last0xError = error;
+        console.error(`0x swap attempt ${attempt} failed:`, error.message);
+
+        if (attempt < maxSwapRetries) {
+          const waitTime = Math.min(2000 * Math.pow(2, attempt - 1), 10000);
+          console.log(`Retrying 0x swap in ${waitTime}ms...`);
+          await new Promise((resolve) => setTimeout(resolve, waitTime));
+        }
+      }
+    }
+
+    console.error('All 0x swap attempts failed, falling back to 1inch...');
+
+    // Fall back to 1inch with retries
+    for (let attempt = 1; attempt <= maxSwapRetries; attempt++) {
+      try {
+        console.log(
+          `Attempting swap with 1inch (attempt ${attempt}/${maxSwapRetries})...`,
+        );
         return await this.swapWith1inch(
           walletLocator,
           sellToken,
@@ -4143,16 +4608,26 @@ export class AerodromeService {
           slippagePercent,
           walletAddress,
         );
-      } catch (oneInchError) {
-        console.error('Both 0x and 1inch swaps failed:', {
-          oxError: error.message,
-          oneInchError: oneInchError.message,
-        });
-        throw new Error(
-          `Swap failed on both 0x and 1inch. 0x error: ${error.message}. 1inch error: ${oneInchError.message}`,
-        );
+      } catch (error) {
+        last1inchError = error;
+        console.error(`1inch swap attempt ${attempt} failed:`, error.message);
+
+        if (attempt < maxSwapRetries) {
+          const waitTime = Math.min(2000 * Math.pow(2, attempt - 1), 10000);
+          console.log(`Retrying 1inch swap in ${waitTime}ms...`);
+          await new Promise((resolve) => setTimeout(resolve, waitTime));
+        }
       }
     }
+
+    console.error('Both 0x and 1inch swaps failed after all retries:', {
+      oxError: last0xError?.message,
+      oneInchError: last1inchError?.message,
+    });
+
+    throw new Error(
+      `Swap failed on both 0x and 1inch after ${maxSwapRetries} attempts each. 0x error: ${last0xError?.message}. 1inch error: ${last1inchError?.message}`,
+    );
   }
 
   /**
@@ -4163,29 +4638,42 @@ export class AerodromeService {
     sellToken: string,
     buyToken: string,
     sellAmountRaw: string,
-    slippageBps: number,
     walletAddress: string,
   ): Promise<{ buyAmount: string; txResult: any }> {
     console.log('=== Executing 0x Swap ===');
 
-    //current balance of sellToken
-    const currentBalance = await this.readContract(
+    // Get pre-swap balances
+    const preSwapSellBalance = await this.readContract(
       sellToken,
       ERC20_ABI as unknown as any[],
       'balanceOf',
       [walletAddress],
     );
 
-    // Decode the balance
+    const preSwapBuyBalance = await this.readContract(
+      buyToken,
+      ERC20_ABI as unknown as any[],
+      'balanceOf',
+      [walletAddress],
+    );
+
+    // Decode the balances
     const { decodeFunctionResult } = await import('viem');
-    const decodedBalance = decodeFunctionResult({
+    const decodedPreSwapSellBalance = decodeFunctionResult({
       abi: ERC20_ABI as any,
       functionName: 'balanceOf',
-      data: currentBalance,
+      data: preSwapSellBalance,
     });
 
-    console.log('currentBalance raw:', currentBalance);
-    console.log('currentBalance decoded:', decodedBalance.toString());
+    const decodedPreSwapBuyBalance = decodeFunctionResult({
+      abi: ERC20_ABI as any,
+      functionName: 'balanceOf',
+      data: preSwapBuyBalance,
+    });
+
+    console.log('Pre-swap balances:');
+    console.log('Sell token balance:', decodedPreSwapSellBalance.toString());
+    console.log('Buy token balance:', decodedPreSwapBuyBalance.toString());
 
     // Get price quote
     const priceQuote = await this.get0xPrice(
@@ -4193,7 +4681,6 @@ export class AerodromeService {
       buyToken,
       sellAmountRaw,
       walletAddress,
-      slippageBps,
     );
 
     // Approve if needed
@@ -4212,7 +4699,6 @@ export class AerodromeService {
       buyToken,
       sellAmountRaw,
       walletAddress,
-      slippageBps,
     );
 
     // Execute swap
@@ -4222,6 +4708,102 @@ export class AerodromeService {
       swapQuote.transaction.data,
       swapQuote.transaction.value || '0',
     );
+
+    console.log('=== 0x Swap Transaction Result ===');
+    console.log('Transaction Hash:', txResult?.transactionHash);
+    console.log('Expected Buy Amount:', swapQuote.buyAmount);
+    console.log('Transaction Status:', txResult?.status);
+
+    // Verify the swap actually worked by checking balance changes
+    if (txResult?.status === 'success') {
+      // Wait a bit for the transaction to be processed
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+
+      // Get post-swap balances
+      const postSwapSellBalance = await this.readContract(
+        sellToken,
+        ERC20_ABI as unknown as any[],
+        'balanceOf',
+        [walletAddress],
+      );
+
+      const postSwapBuyBalance = await this.readContract(
+        buyToken,
+        ERC20_ABI as unknown as any[],
+        'balanceOf',
+        [walletAddress],
+      );
+
+      const decodedPostSwapSellBalance = decodeFunctionResult({
+        abi: ERC20_ABI as any,
+        functionName: 'balanceOf',
+        data: postSwapSellBalance,
+      });
+
+      const decodedPostSwapBuyBalance = decodeFunctionResult({
+        abi: ERC20_ABI as any,
+        functionName: 'balanceOf',
+        data: postSwapBuyBalance,
+      });
+
+      console.log('Post-swap balances:');
+      console.log('Sell token balance:', decodedPostSwapSellBalance.toString());
+      console.log('Buy token balance:', decodedPostSwapBuyBalance.toString());
+
+      // Calculate balance changes
+      const sellBalanceChange =
+        BigInt(decodedPreSwapSellBalance.toString()) -
+        BigInt(decodedPostSwapSellBalance.toString());
+      const buyBalanceChange =
+        BigInt(decodedPostSwapBuyBalance.toString()) -
+        BigInt(decodedPreSwapBuyBalance.toString());
+
+      console.log('Balance changes:');
+      console.log('Sell token change:', sellBalanceChange.toString());
+      console.log('Buy token change:', buyBalanceChange.toString());
+      console.log('Expected sell amount:', sellAmountRaw);
+      console.log('Expected min buy amount:', swapQuote.minBuyAmount);
+
+      // Verify that either:
+      // 1. Sell token balance decreased by expected amount (with tolerance), OR
+      // 2. Buy token balance increased by at least the minimum expected amount
+      const expectedSellAmount = BigInt(sellAmountRaw);
+      const expectedMinBuyAmount = BigInt(swapQuote.minBuyAmount);
+      const sellTolerance = (expectedSellAmount * BigInt(5)) / BigInt(1000); // 0.5% tolerance
+      const minExpectedSellChange = expectedSellAmount - sellTolerance;
+      const maxExpectedSellChange = expectedSellAmount + sellTolerance;
+
+      console.log('Verification thresholds:');
+      console.log(
+        'Min expected sell change:',
+        minExpectedSellChange.toString(),
+      );
+      console.log(
+        'Max expected sell change:',
+        maxExpectedSellChange.toString(),
+      );
+      console.log('Min expected buy change:', expectedMinBuyAmount.toString());
+
+      const sellAmountCheck =
+        sellBalanceChange >= minExpectedSellChange &&
+        sellBalanceChange <= maxExpectedSellChange;
+
+      const buyAmountCheck = buyBalanceChange >= expectedMinBuyAmount;
+
+      console.log('Verification results:');
+      console.log('Sell amount check passed:', sellAmountCheck);
+      console.log('Buy amount check passed:', buyAmountCheck);
+
+      if (!sellAmountCheck && !buyAmountCheck) {
+        const errorMessage = `0x swap transaction succeeded but neither sell nor buy token balance changed as expected. Transaction hash: ${txResult?.transactionHash}. Expected sell change: ${expectedSellAmount} (±${sellTolerance}), Actual sell change: ${sellBalanceChange}, Expected min buy change: ${expectedMinBuyAmount}, Actual buy change: ${buyBalanceChange}`;
+        console.error('=== SWAP VERIFICATION FAILED ===');
+        console.error(errorMessage);
+        throw new Error(errorMessage);
+      }
+
+      console.log('=== SWAP VERIFICATION SUCCESSFUL ===');
+      console.log('Token transfer confirmed. Swap was successful.');
+    }
 
     return { buyAmount: swapQuote.buyAmount, txResult };
   }
@@ -4244,24 +4826,38 @@ export class AerodromeService {
       const spenderAddress = await this.get1inchSpender();
       console.log('spenderAddress', spenderAddress);
 
-      //current balance of sellToken
-      const currentBalance = await this.readContract(
+      // Get pre-swap balances
+      const preSwapSellBalance = await this.readContract(
         sellToken,
         ERC20_ABI as unknown as any[],
         'balanceOf',
         [walletAddress],
       );
 
-      // Decode the balance
+      const preSwapBuyBalance = await this.readContract(
+        buyToken,
+        ERC20_ABI as unknown as any[],
+        'balanceOf',
+        [walletAddress],
+      );
+
+      // Decode the balances
       const { decodeFunctionResult } = await import('viem');
-      const decodedBalance = decodeFunctionResult({
+      const decodedPreSwapSellBalance = decodeFunctionResult({
         abi: ERC20_ABI as any,
         functionName: 'balanceOf',
-        data: currentBalance,
+        data: preSwapSellBalance,
       });
 
-      console.log('currentBalance raw:', currentBalance);
-      console.log('currentBalance decoded:', decodedBalance.toString());
+      const decodedPreSwapBuyBalance = decodeFunctionResult({
+        abi: ERC20_ABI as any,
+        functionName: 'balanceOf',
+        data: preSwapBuyBalance,
+      });
+
+      console.log('Pre-swap balances:');
+      console.log('Sell token balance:', decodedPreSwapSellBalance.toString());
+      console.log('Buy token balance:', decodedPreSwapBuyBalance.toString());
 
       // Approve token for 1inch spender
       console.log('Approving token for 1inch spender...');
@@ -4293,6 +4889,113 @@ export class AerodromeService {
         swapResponse.tx.data,
         swapResponse.tx.value || '0',
       );
+
+      console.log('=== 1inch Swap Transaction Result ===');
+      console.log('Transaction Hash:', txResult?.transactionHash);
+      console.log(
+        'Expected Buy Amount:',
+        swapResponse.dstAmount || sellAmountRaw,
+      );
+      console.log('Transaction Status:', txResult?.status);
+
+      // Verify the swap actually worked by checking balance changes
+      if (txResult?.status === 'success') {
+        // Wait a bit for the transaction to be processed
+        await new Promise((resolve) => setTimeout(resolve, 2000));
+
+        // Get post-swap balances
+        const postSwapSellBalance = await this.readContract(
+          sellToken,
+          ERC20_ABI as unknown as any[],
+          'balanceOf',
+          [walletAddress],
+        );
+
+        const postSwapBuyBalance = await this.readContract(
+          buyToken,
+          ERC20_ABI as unknown as any[],
+          'balanceOf',
+          [walletAddress],
+        );
+
+        const decodedPostSwapSellBalance = decodeFunctionResult({
+          abi: ERC20_ABI as any,
+          functionName: 'balanceOf',
+          data: postSwapSellBalance,
+        });
+
+        const decodedPostSwapBuyBalance = decodeFunctionResult({
+          abi: ERC20_ABI as any,
+          functionName: 'balanceOf',
+          data: postSwapBuyBalance,
+        });
+
+        console.log('Post-swap balances:');
+        console.log(
+          'Sell token balance:',
+          decodedPostSwapSellBalance.toString(),
+        );
+        console.log('Buy token balance:', decodedPostSwapBuyBalance.toString());
+
+        // Calculate balance changes
+        const sellBalanceChange =
+          BigInt(decodedPreSwapSellBalance.toString()) -
+          BigInt(decodedPostSwapSellBalance.toString());
+        const buyBalanceChange =
+          BigInt(decodedPostSwapBuyBalance.toString()) -
+          BigInt(decodedPreSwapBuyBalance.toString());
+
+        console.log('Balance changes:');
+        console.log('Sell token change:', sellBalanceChange.toString());
+        console.log('Buy token change:', buyBalanceChange.toString());
+        console.log('Expected sell amount:', sellAmountRaw);
+        console.log(
+          'Expected buy amount:',
+          swapResponse.dstAmount || swapResponse.toTokenAmount,
+        );
+
+        // Verify that either:
+        // 1. Sell token balance decreased by expected amount (with tolerance), OR
+        // 2. Buy token balance increased by at least the expected amount
+        const expectedSellAmount = BigInt(sellAmountRaw);
+        const expectedBuyAmount = BigInt(
+          swapResponse.dstAmount || swapResponse.toTokenAmount || '0',
+        );
+        const sellTolerance = (expectedSellAmount * BigInt(5)) / BigInt(1000); // 0.5% tolerance
+        const minExpectedSellChange = expectedSellAmount - sellTolerance;
+        const maxExpectedSellChange = expectedSellAmount + sellTolerance;
+
+        console.log('Verification thresholds:');
+        console.log(
+          'Min expected sell change:',
+          minExpectedSellChange.toString(),
+        );
+        console.log(
+          'Max expected sell change:',
+          maxExpectedSellChange.toString(),
+        );
+        console.log('Expected buy change:', expectedBuyAmount.toString());
+
+        const sellAmountCheck =
+          sellBalanceChange >= minExpectedSellChange &&
+          sellBalanceChange <= maxExpectedSellChange;
+
+        const buyAmountCheck = buyBalanceChange >= expectedBuyAmount;
+
+        console.log('Verification results:');
+        console.log('Sell amount check passed:', sellAmountCheck);
+        console.log('Buy amount check passed:', buyAmountCheck);
+
+        if (!sellAmountCheck && !buyAmountCheck) {
+          const errorMessage = `1inch swap transaction succeeded but neither sell nor buy token balance changed as expected. Transaction hash: ${txResult?.transactionHash}. Expected sell change: ${expectedSellAmount} (±${sellTolerance}), Actual sell change: ${sellBalanceChange}, Expected buy change: ${expectedBuyAmount}, Actual buy change: ${buyBalanceChange}`;
+          console.error('=== SWAP VERIFICATION FAILED ===');
+          console.error(errorMessage);
+          throw new Error(errorMessage);
+        }
+
+        console.log('=== SWAP VERIFICATION SUCCESSFUL ===');
+        console.log('Token transfer confirmed. Swap was successful.');
+      }
 
       return { buyAmount: swapResponse.dstAmount || sellAmountRaw, txResult };
     } catch (error) {
@@ -4331,6 +5034,39 @@ export class AerodromeService {
   ): Promise<{ buyAmount: string; txResult: any }> {
     console.log('=== Executing Alternative 1inch Swap ===');
 
+    // Get pre-swap balances
+    const preSwapSellBalance = await this.readContract(
+      sellToken,
+      ERC20_ABI as unknown as any[],
+      'balanceOf',
+      [walletAddress],
+    );
+
+    const preSwapBuyBalance = await this.readContract(
+      buyToken,
+      ERC20_ABI as unknown as any[],
+      'balanceOf',
+      [walletAddress],
+    );
+
+    // Decode the balances
+    const { decodeFunctionResult } = await import('viem');
+    const decodedPreSwapSellBalance = decodeFunctionResult({
+      abi: ERC20_ABI as any,
+      functionName: 'balanceOf',
+      data: preSwapSellBalance,
+    });
+
+    const decodedPreSwapBuyBalance = decodeFunctionResult({
+      abi: ERC20_ABI as any,
+      functionName: 'balanceOf',
+      data: preSwapBuyBalance,
+    });
+
+    console.log('Pre-swap balances:');
+    console.log('Sell token balance:', decodedPreSwapSellBalance.toString());
+    console.log('Buy token balance:', decodedPreSwapBuyBalance.toString());
+
     // Get spender address first
     const spenderAddress = await this.get1inchSpender();
 
@@ -4367,6 +5103,100 @@ export class AerodromeService {
       swapResponse.tx.data,
       swapResponse.tx.value || '0',
     );
+
+    console.log('=== Alternative 1inch Swap Transaction Result ===');
+    console.log('Transaction Hash:', txResult?.transactionHash);
+    console.log('Transaction Status:', txResult?.status);
+
+    // Verify the swap actually worked by checking balance changes
+    if (txResult?.status === 'success') {
+      // Wait a bit for the transaction to be processed
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+
+      // Get post-swap balances
+      const postSwapSellBalance = await this.readContract(
+        sellToken,
+        ERC20_ABI as unknown as any[],
+        'balanceOf',
+        [walletAddress],
+      );
+
+      const postSwapBuyBalance = await this.readContract(
+        buyToken,
+        ERC20_ABI as unknown as any[],
+        'balanceOf',
+        [walletAddress],
+      );
+
+      const decodedPostSwapSellBalance = decodeFunctionResult({
+        abi: ERC20_ABI as any,
+        functionName: 'balanceOf',
+        data: postSwapSellBalance,
+      });
+
+      const decodedPostSwapBuyBalance = decodeFunctionResult({
+        abi: ERC20_ABI as any,
+        functionName: 'balanceOf',
+        data: postSwapBuyBalance,
+      });
+
+      console.log('Post-swap balances:');
+      console.log('Sell token balance:', decodedPostSwapSellBalance.toString());
+      console.log('Buy token balance:', decodedPostSwapBuyBalance.toString());
+
+      // Calculate balance changes
+      const sellBalanceChange =
+        BigInt(decodedPreSwapSellBalance.toString()) -
+        BigInt(decodedPostSwapSellBalance.toString());
+      const buyBalanceChange =
+        BigInt(decodedPostSwapBuyBalance.toString()) -
+        BigInt(decodedPreSwapBuyBalance.toString());
+
+      console.log('Balance changes:');
+      console.log('Sell token change:', sellBalanceChange.toString());
+      console.log('Buy token change:', buyBalanceChange.toString());
+      console.log('Expected sell amount:', sellAmountRaw);
+
+      // Verify that either:
+      // 1. Sell token balance decreased by expected amount (with tolerance), OR
+      // 2. Buy token balance increased by some reasonable amount
+      const expectedSellAmount = BigInt(sellAmountRaw);
+      const sellTolerance = (expectedSellAmount * BigInt(5)) / BigInt(1000); // 0.5% tolerance
+      const minExpectedSellChange = expectedSellAmount - sellTolerance;
+      const maxExpectedSellChange = expectedSellAmount + sellTolerance;
+      const minExpectedBuyChange = BigInt(1000); // Minimum 1000 wei increase for buy token
+
+      console.log('Verification thresholds:');
+      console.log(
+        'Min expected sell change:',
+        minExpectedSellChange.toString(),
+      );
+      console.log(
+        'Max expected sell change:',
+        maxExpectedSellChange.toString(),
+      );
+      console.log('Min expected buy change:', minExpectedBuyChange.toString());
+
+      const sellAmountCheck =
+        sellBalanceChange >= minExpectedSellChange &&
+        sellBalanceChange <= maxExpectedSellChange;
+
+      const buyAmountCheck = buyBalanceChange >= minExpectedBuyChange;
+
+      console.log('Verification results:');
+      console.log('Sell amount check passed:', sellAmountCheck);
+      console.log('Buy amount check passed:', buyAmountCheck);
+
+      if (!sellAmountCheck && !buyAmountCheck) {
+        const errorMessage = `Alternative 1inch swap transaction succeeded but neither sell nor buy token balance changed as expected. Transaction hash: ${txResult?.transactionHash}. Expected sell change: ${expectedSellAmount} (±${sellTolerance}), Actual sell change: ${sellBalanceChange}, Expected min buy change: ${minExpectedBuyChange}, Actual buy change: ${buyBalanceChange}`;
+        console.error('=== SWAP VERIFICATION FAILED ===');
+        console.error(errorMessage);
+        throw new Error(errorMessage);
+      }
+
+      console.log('=== SWAP VERIFICATION SUCCESSFUL ===');
+      console.log('Token transfer confirmed. Swap was successful.');
+    }
 
     // For the alternative method, we don't have the exact buy amount
     // We'll use the sell amount as a fallback
@@ -4425,12 +5255,11 @@ export class AerodromeService {
    */
   async getPositionsNeedingRebalancing(): Promise<{
     outOfRange: any[];
-    dollarFees: any[];
-    imbalanced: any[];
-    ageLimit: any[];
   }> {
     try {
-      console.log('=== Getting Positions Needing Rebalancing ===');
+      console.log(
+        '=== Getting Positions Needing Rebalancing (Out-of-Range Only) ===',
+      );
 
       // Get active positions for current pool
       const activePositions = await this.getAllActivePositions();
@@ -4439,9 +5268,6 @@ export class AerodromeService {
         console.log('No active positions found for current pool');
         return {
           outOfRange: [],
-          dollarFees: [],
-          imbalanced: [],
-          ageLimit: [],
         };
       }
 
@@ -4465,7 +5291,8 @@ export class AerodromeService {
       const availablePositions = activePositions.filter(
         (position) =>
           !rebalancingWallets.includes(position.walletLocator) &&
-          position.metadata?.strategyName !== 'fee-optimiser',
+          position.metadata?.strategyName !== 'fee-optimiser' &&
+          position.metadata?.strategyName !== 'fee-optimiser-v2',
       );
 
       console.log(
@@ -4474,38 +5301,17 @@ export class AerodromeService {
 
       const results = {
         outOfRange: [] as any[],
-        dollarFees: [] as any[],
-        imbalanced: [] as any[],
-        ageLimit: [] as any[],
       };
 
       console.log('availablePositions', availablePositions);
 
-      // Check for out-of-range positions (highest priority)
+      // Check for out-of-range positions (only condition)
       const outOfRangePositions =
         await this.getOutOfRangePositions(availablePositions);
       results.outOfRange = outOfRangePositions;
 
-      // Check for dollar value loss positions
-      const dollarValuePositions =
-        await this.getDollarValuePositions(availablePositions);
-      results.dollarFees = dollarValuePositions;
-
-      // Check for imbalanced token positions
-      const imbalancedPositions =
-        await this.getImbalancedPositions(availablePositions);
-      results.imbalanced = imbalancedPositions;
-
-      // Check for age-limit positions (24 hours threshold)
-      const ageLimitPositions =
-        await this.getAgeLimitPositions(availablePositions);
-      results.ageLimit = ageLimitPositions;
-
       console.log('Rebalancing analysis results:', {
         outOfRange: results.outOfRange.length,
-        dollarFees: results.dollarFees.length,
-        imbalanced: results.imbalanced.length,
-        ageLimit: results.ageLimit.length,
       });
 
       return results;
@@ -4573,22 +5379,43 @@ export class AerodromeService {
             return false;
           }
 
+          // Check if position is less than 30 minutes old
+          const positionCreatedAt = new Date(position.createdAt);
+          const thirtyMinutesAgo = new Date(Date.now() - 30 * 60 * 1000);
+
+          if (positionCreatedAt > thirtyMinutesAgo) {
+            console.log(
+              `Position ${position.positionId} is less than 30 minutes old (created at ${positionCreatedAt.toISOString()}), skipping rebalancing`,
+            );
+            return false;
+          }
+
+          // Apply buffer only for percentDeviation = 0.5 to prevent premature rebalancing
+          const percentDeviation =
+            position.metadata?.tickRange?.percentDeviation || 0.5;
+          const buffer = percentDeviation === 0.5 ? 10 : 0; // Only 10 ticks buffer for 0.5% positions
+
           const isOutOfRange =
-            currentTick < tickRange.tickLower ||
-            currentTick > tickRange.tickUpper;
+            currentTick < tickRange.tickLower - buffer ||
+            currentTick > tickRange.tickUpper + buffer;
 
           console.log(`Position ${position.positionId} tick check:`, {
             currentTick,
             tickLower: tickRange.tickLower,
             tickUpper: tickRange.tickUpper,
+            percentDeviation,
+            buffer,
+            effectiveLower: tickRange.tickLower - buffer,
+            effectiveUpper: tickRange.tickUpper + buffer,
             isOutOfRange,
-            belowLower: currentTick < tickRange.tickLower,
-            aboveUpper: currentTick > tickRange.tickUpper,
+            belowLower: currentTick < tickRange.tickLower - buffer,
+            aboveUpper: currentTick > tickRange.tickUpper + buffer,
+            positionAge: `${Math.round((Date.now() - positionCreatedAt.getTime()) / (1000 * 60))} minutes`,
           });
 
           if (isOutOfRange) {
             console.log(
-              `Position ${position.positionId} is out of range: current tick ${currentTick} outside range [${tickRange.tickLower}, ${tickRange.tickUpper}]`,
+              `Position ${position.positionId} is out of range: current tick ${currentTick} outside buffered range [${tickRange.tickLower - buffer}, ${tickRange.tickUpper + buffer}] (original range: [${tickRange.tickLower}, ${tickRange.tickUpper}])`,
             );
           }
 
@@ -4712,312 +5539,6 @@ export class AerodromeService {
         error,
       );
       throw error;
-    }
-  }
-
-  /**
-   * Check which positions have lost more than 2% of their original USDC value
-   * This triggers rebalancing when current token values are below 98% of original investment
-   */
-  private async getDollarValuePositions(
-    activePositions: any[],
-  ): Promise<any[]> {
-    try {
-      console.log('=== Checking for Dollar Value Loss Positions ===');
-
-      if (activePositions.length === 0) {
-        console.log('No active positions to check for dollar value loss');
-        return [];
-      }
-
-      // Get all pools to analyze
-      const allPools = this.getAllPoolsToAnalyze();
-      const dollarValuePositions: any[] = [];
-
-      // Check each pool for dollar value loss positions
-      for (const pool of allPools) {
-        const poolConfig = getPoolConfig(pool);
-
-        if (!poolConfig) {
-          console.warn(`Pool config not found for pool ${pool}`);
-          continue;
-        }
-
-        // Filter positions for this specific pool
-        const poolPositions = activePositions.filter(
-          (pos) => pos.pool === pool,
-        );
-
-        // Check each position for dollar value loss
-        for (const position of poolPositions) {
-          try {
-            console.log(
-              `Checking dollar value for position ${position.positionId} in pool ${pool}`,
-            );
-
-            // Get current token amounts
-            const { amount0, amount1 } =
-              await this.getCurrentTokenAmounts(position);
-
-            // Get token prices
-            const token0Price = await this.getTokenPrice(poolConfig.token0Name);
-            const token1Price = await this.getTokenPrice(poolConfig.token1Name);
-
-            // Convert amounts to human-readable values
-            const amount0Human =
-              Number(amount0) / Math.pow(10, poolConfig.token0Decimals);
-            const amount1Human =
-              Number(amount1) / Math.pow(10, poolConfig.token1Decimals);
-
-            // Calculate current dollar values
-            const token0DollarValue = amount0Human * token0Price;
-            const token1DollarValue = amount1Human * token1Price;
-            const totalDollarValue = token0DollarValue + token1DollarValue;
-
-            // Get original USDC amount
-            const originalUsdcAmount = position.usdcAmount;
-
-            // Calculate loss percentage
-            const lossPercentage =
-              ((originalUsdcAmount - totalDollarValue) / originalUsdcAmount) *
-              100;
-
-            console.log('Dollar value analysis:', {
-              positionId: position.positionId,
-              originalUsdcAmount,
-              totalDollarValue,
-              lossPercentage: lossPercentage.toFixed(2) + '%',
-            });
-
-            // Check if loss is significant (>2%)
-            if (lossPercentage > 2) {
-              console.log(
-                `Position ${position.positionId} has significant dollar value loss: ${lossPercentage.toFixed(2)}%`,
-              );
-              dollarValuePositions.push(position);
-            }
-          } catch (error) {
-            console.error(
-              `Error checking dollar value for position ${position.positionId}:`,
-              error,
-            );
-          }
-        }
-      }
-
-      console.log(
-        `Found ${dollarValuePositions.length} positions with significant dollar value loss across all pools`,
-      );
-      return dollarValuePositions;
-    } catch (error) {
-      console.error('Error checking for dollar value loss positions:', error);
-      return []; // Return empty array on error to avoid breaking the entire process
-    }
-  }
-
-  /**
-   * Check which positions have imbalanced token ratios (one token >85% or <15% of total value)
-   * This triggers rebalancing when token distribution deviates significantly from 50/50
-   * SKIPS narrow range positions (percentDeviation < 2%) to avoid excessive rebalancing
-   */
-  private async getImbalancedPositions(activePositions: any[]): Promise<any[]> {
-    try {
-      console.log('=== Checking for Imbalanced Token Positions ===');
-
-      if (activePositions.length === 0) {
-        console.log('No active positions to check for token imbalance');
-        return [];
-      }
-
-      // Get current pool being analyzed
-      const currentPool = this.getAllPoolsToAnalyze()[0];
-      const poolConfig = getPoolConfig(currentPool);
-
-      if (!poolConfig) {
-        console.warn(`Pool config not found for pool ${currentPool}`);
-        return [];
-      }
-
-      const imbalancedPositions: any[] = [];
-
-      // Check each position for token imbalance
-      for (const position of activePositions) {
-        try {
-          console.log(
-            `Checking token balance for position ${position.positionId}`,
-          );
-
-          // Skip narrow range positions to avoid excessive rebalancing
-          const tickRange = position.metadata?.tickRange;
-          const percentDeviation = tickRange?.percentDeviation;
-
-          if (percentDeviation !== undefined && percentDeviation < 2) {
-            console.log(
-              `Position ${position.positionId} has narrow range (${percentDeviation}% deviation), skipping imbalance check`,
-            );
-            continue;
-          }
-
-          // Get current token amounts
-          const { amount0, amount1 } =
-            await this.getCurrentTokenAmounts(position);
-
-          // Get token prices
-          const token0Price = await this.getTokenPrice(poolConfig.token0Name);
-          const token1Price = await this.getTokenPrice(poolConfig.token1Name);
-
-          console.log('Token prices:', {
-            token0Name: poolConfig.token0Name,
-            token1Name: poolConfig.token1Name,
-            token0Price,
-            token1Price,
-          });
-
-          // Convert amounts to human-readable values
-          const amount0Human =
-            Number(amount0) / Math.pow(10, poolConfig.token0Decimals);
-          const amount1Human =
-            Number(amount1) / Math.pow(10, poolConfig.token1Decimals);
-
-          console.log('Token amounts (human):', {
-            amount0Human,
-            amount1Human,
-            token0Decimals: poolConfig.token0Decimals,
-            token1Decimals: poolConfig.token1Decimals,
-          });
-
-          // Calculate current dollar values
-          const token0DollarValue = amount0Human * token0Price;
-          const token1DollarValue = amount1Human * token1Price;
-          const totalDollarValue = token0DollarValue + token1DollarValue;
-
-          // Calculate token ratios
-          const token0Ratio =
-            totalDollarValue > 0 ? token0DollarValue / totalDollarValue : 0;
-          const token1Ratio =
-            totalDollarValue > 0 ? token1DollarValue / totalDollarValue : 0;
-
-          // Define imbalance thresholds (85/15 ratio - less aggressive than 80/20)
-          const IMBALANCE_THRESHOLD = 0.85; // 85%
-          const MIN_RATIO = 0.15; // 15%
-
-          console.log('Token ratio analysis:', {
-            token0DollarValue,
-            token1DollarValue,
-            totalDollarValue,
-            token0Ratio: (token0Ratio * 100).toFixed(2) + '%',
-            token1Ratio: (token1Ratio * 100).toFixed(2) + '%',
-            threshold: (IMBALANCE_THRESHOLD * 100).toFixed(2) + '% (85%)',
-            minRatio: (MIN_RATIO * 100).toFixed(2) + '% (15%)',
-            percentDeviation,
-          });
-
-          // Check if either token exceeds 80% or falls below 20%
-          const isToken0Imbalanced =
-            token0Ratio > IMBALANCE_THRESHOLD || token0Ratio < MIN_RATIO;
-          const isToken1Imbalanced =
-            token1Ratio > IMBALANCE_THRESHOLD || token1Ratio < MIN_RATIO;
-          const isImbalanced = isToken0Imbalanced || isToken1Imbalanced;
-
-          if (isImbalanced) {
-            console.log(
-              `Position ${position.positionId} has IMBALANCED TOKENS (85/15 threshold):`,
-              {
-                token0Ratio: (token0Ratio * 100).toFixed(2) + '%',
-                token1Ratio: (token1Ratio * 100).toFixed(2) + '%',
-                token0Imbalanced: isToken0Imbalanced,
-                token1Imbalanced: isToken1Imbalanced,
-                percentDeviation,
-                reason: isToken0Imbalanced
-                  ? `Token0 (${poolConfig.token0Name}) is ${token0Ratio > IMBALANCE_THRESHOLD ? 'overweight (>85%)' : 'underweight (<15%)'}`
-                  : `Token1 (${poolConfig.token1Name}) is ${token1Ratio > IMBALANCE_THRESHOLD ? 'overweight (>85%)' : 'underweight (<15%)'}`,
-              },
-            );
-
-            // Add position to rebalancing list
-            position.imbalanceAnalysis = {
-              token0DollarValue,
-              token1DollarValue,
-              totalDollarValue,
-              token0Ratio,
-              token1Ratio,
-              isToken0Imbalanced,
-              isToken1Imbalanced,
-              overweightToken:
-                token0Ratio > token1Ratio
-                  ? poolConfig.token0Name
-                  : poolConfig.token1Name,
-              overweightRatio: Math.max(token0Ratio, token1Ratio),
-              underweightRatio: Math.min(token0Ratio, token1Ratio),
-              percentDeviation,
-            };
-            imbalancedPositions.push(position);
-          } else {
-            console.log(
-              `Position ${position.positionId} token balance OK: ${(token0Ratio * 100).toFixed(2)}% / ${(token1Ratio * 100).toFixed(2)}%`,
-            );
-          }
-        } catch (error) {
-          console.error(
-            `Error checking token balance for position ${position.positionId}:`,
-            error,
-          );
-          // Continue with other positions instead of failing completely
-        }
-      }
-
-      console.log(
-        `Found ${imbalancedPositions.length} imbalanced token positions out of ${activePositions.length} total`,
-      );
-      return imbalancedPositions;
-    } catch (error) {
-      console.error('Error checking for imbalanced token positions:', error);
-      return []; // Return empty array on error to avoid breaking the entire process
-    }
-  }
-
-  /**
-   * Check which positions are older than 2 days (48 hours)
-   * This triggers rebalancing for aged positions
-   */
-  private async getAgeLimitPositions(activePositions: any[]): Promise<any[]> {
-    try {
-      console.log('=== Checking for Age-Limit Positions ===');
-      if (activePositions.length === 0) {
-        console.log('No active positions to check for age limit');
-        return [];
-      }
-
-      const now = Date.now();
-
-      // Use a fixed age threshold of 24 hours for age-limit rebalancing
-      // This is separate from timeSinceLastRun which is used for cron scheduling
-      const ageThreshold = 24 * 60 * 60 * 1000; // 24 hours
-      const thresholdTime = now - ageThreshold;
-
-      console.log(
-        `Dynamic age threshold: ${(ageThreshold / 1000 / 60 / 60).toFixed(2)} hours`,
-      );
-      console.log(
-        `Checking for positions older than: ${new Date(thresholdTime).toISOString()}`,
-      );
-
-      const agedPositions = activePositions.filter((position) => {
-        const createdAt = position.createdAt
-          ? new Date(position.createdAt).getTime()
-          : null;
-        if (!createdAt) return false;
-        return createdAt < thresholdTime;
-      });
-
-      const thresholdHours = (ageThreshold / 1000 / 60 / 60).toFixed(2);
-      console.log(
-        `Found ${agedPositions.length} positions older than ${thresholdHours} hours out of ${activePositions.length} total`,
-      );
-      return agedPositions;
-    } catch (error) {
-      console.error('Error checking for age-limit positions:', error);
-      return [];
     }
   }
 
@@ -5523,28 +6044,12 @@ export class AerodromeService {
     results: {
       pools: string;
       totalPositions: number;
+      feeCollection: {
+        totalFeesCollected: number;
+        positionsWithFeesCollected: number;
+        totalPositions: number;
+      };
       outOfRange: {
-        found: number;
-        processed: number;
-        successful: number;
-        failed: number;
-        skipped: number;
-      };
-      dollarFees: {
-        found: number;
-        processed: number;
-        successful: number;
-        failed: number;
-        skipped: number;
-      };
-      imbalanced: {
-        found: number;
-        processed: number;
-        successful: number;
-        failed: number;
-        skipped: number;
-      };
-      ageLimit: {
         found: number;
         processed: number;
         successful: number;
@@ -5570,35 +6075,74 @@ export class AerodromeService {
       const allPools = this.getAllPoolsToAnalyze();
       console.log(`Analyzing all pools: ${allPools.join(', ')}`);
 
-      // Get positions that need rebalancing with dynamic time criteria
+      // Get all active positions for fee collection
+      const allActivePositions = await this.getAllActivePositions();
+      console.log(
+        `Found ${allActivePositions.length} total active positions for fee collection`,
+      );
+
+      // Step 1: Collect fees from ALL positions (regardless of rebalancing needs)
+      console.log('=== Step 1: Collecting fees from all positions ===');
+      let totalFeesCollected = 0;
+      let positionsWithFeesCollected = 0;
+
+      for (const position of allActivePositions) {
+        try {
+          console.log(`Collecting fees for position: ${position.positionId}`);
+
+          // Collect fees (this returns cumulative fees, which is what we want)
+          const collectResult = await this.collectFees(
+            position.walletLocator,
+            position.metadata?.mintDetails?.tokenId,
+            false, // Calculate APR to get totalFeesUSD
+          );
+
+          const collectedFees = collectResult?.collectedFees?.totalFeesUSD || 0;
+          if (collectedFees > 0) {
+            totalFeesCollected += collectedFees;
+            positionsWithFeesCollected++;
+            console.log(
+              `✅ Collected $${collectedFees} in fees from position ${position.positionId}`,
+            );
+          } else {
+            console.log(
+              `ℹ️ No fees to collect from position ${position.positionId}`,
+            );
+          }
+        } catch (error) {
+          console.error(
+            `❌ Error collecting fees from position ${position.positionId}:`,
+            error,
+          );
+        }
+      }
+
+      console.log(`=== Fee Collection Summary ===`);
+      console.log(`Total fees collected: $${totalFeesCollected}`);
+      console.log(
+        `Positions with fees collected: ${positionsWithFeesCollected}/${allActivePositions.length}`,
+      );
+
+      // Step 1.5: Validate calculated amounts against actual balances for all wallets
+      console.log(
+        '=== Step 1.5: Validating calculated amounts against actual balances ===',
+      );
+      await this.validateCalculatedAmountsAgainstBalances(allActivePositions);
+
+      // Step 2: Get positions that need rebalancing
+      console.log('=== Step 2: Checking for positions needing rebalancing ===');
       const positionsNeedingRebalancing =
         await this.getPositionsNeedingRebalancing();
 
       const results = {
         pools: allPools.join(', '),
-        totalPositions: 0,
+        totalPositions: allActivePositions.length,
+        feeCollection: {
+          totalFeesCollected,
+          positionsWithFeesCollected,
+          totalPositions: allActivePositions.length,
+        },
         outOfRange: {
-          found: 0,
-          processed: 0,
-          successful: 0,
-          failed: 0,
-          skipped: 0,
-        },
-        dollarFees: {
-          found: 0,
-          processed: 0,
-          successful: 0,
-          failed: 0,
-          skipped: 0,
-        },
-        imbalanced: {
-          found: 0,
-          processed: 0,
-          successful: 0,
-          failed: 0,
-          skipped: 0,
-        },
-        ageLimit: {
           found: 0,
           processed: 0,
           successful: 0,
@@ -5607,7 +6151,7 @@ export class AerodromeService {
         },
       };
 
-      // Process out-of-range positions (highest priority)
+      // Process out-of-range positions (only condition)
       results.outOfRange.found = positionsNeedingRebalancing.outOfRange.length;
       console.log(`Found ${results.outOfRange.found} out-of-range positions`);
 
@@ -5644,118 +6188,6 @@ export class AerodromeService {
         }
       }
 
-      // Process dollar value loss positions
-      results.dollarFees.found = positionsNeedingRebalancing.dollarFees.length;
-      console.log(
-        `Found ${results.dollarFees.found} dollar value loss positions`,
-      );
-
-      for (const position of positionsNeedingRebalancing.dollarFees) {
-        try {
-          console.log(
-            `Processing dollar value loss position: ${position.positionId}`,
-          );
-          results.dollarFees.processed++;
-
-          const rebalanceResult = await this.rebalancePosition(
-            position.positionId,
-            'dollar_fees',
-            position.metadata?.strategyName,
-          );
-
-          if (rebalanceResult.success) {
-            results.dollarFees.successful++;
-            console.log(
-              `✅ Successfully added position ${position.positionId} to rebalancing queue`,
-            );
-          } else {
-            results.dollarFees.failed++;
-            console.log(
-              `❌ Failed to add position ${position.positionId} to queue: ${rebalanceResult.message}`,
-            );
-          }
-        } catch (error) {
-          results.dollarFees.failed++;
-          console.error(
-            `❌ Error processing dollar value loss position ${position.positionId}:`,
-            error,
-          );
-        }
-      }
-
-      // Process imbalanced token positions
-      results.imbalanced.found = positionsNeedingRebalancing.imbalanced.length;
-      console.log(
-        `Found ${results.imbalanced.found} imbalanced token positions`,
-      );
-
-      for (const position of positionsNeedingRebalancing.imbalanced) {
-        try {
-          console.log(
-            `Processing imbalanced token position: ${position.positionId}`,
-          );
-          results.imbalanced.processed++;
-
-          const rebalanceResult = await this.rebalancePosition(
-            position.positionId,
-            'imbalanced',
-            position.metadata?.strategyName,
-          );
-
-          if (rebalanceResult.success) {
-            results.imbalanced.successful++;
-            console.log(
-              `✅ Successfully added position ${position.positionId} to rebalancing queue`,
-            );
-          } else {
-            results.imbalanced.failed++;
-            console.log(
-              `❌ Failed to add position ${position.positionId} to queue: ${rebalanceResult.message}`,
-            );
-          }
-        } catch (error) {
-          results.imbalanced.failed++;
-          console.error(
-            `❌ Error processing imbalanced token position ${position.positionId}:`,
-            error,
-          );
-        }
-      }
-
-      // Process age-limit positions
-      results.ageLimit.found = positionsNeedingRebalancing.ageLimit.length;
-      console.log(`Found ${results.ageLimit.found} age-limit positions`);
-      for (const position of positionsNeedingRebalancing.ageLimit) {
-        try {
-          console.log(`Processing age-limit position: ${position.positionId}`);
-          results.ageLimit.processed++;
-
-          const rebalanceResult = await this.rebalancePosition(
-            position.positionId,
-            'age_limit',
-            position.metadata?.strategyName,
-          );
-
-          if (rebalanceResult.success) {
-            results.ageLimit.successful++;
-            console.log(
-              `✅ Successfully added position ${position.positionId} to rebalancing queue`,
-            );
-          } else {
-            results.ageLimit.failed++;
-            console.log(
-              `❌ Failed to add position ${position.positionId} to queue: ${rebalanceResult.message}`,
-            );
-          }
-        } catch (error) {
-          results.ageLimit.failed++;
-          console.error(
-            `❌ Error processing age-limit position ${position.positionId}:`,
-            error,
-          );
-        }
-      }
-
       const endTime = Date.now();
       const duration = endTime - startTime;
 
@@ -5778,28 +6210,12 @@ export class AerodromeService {
         results: {
           pools: this.getAllPoolsToAnalyze().join(', '),
           totalPositions: 0,
+          feeCollection: {
+            totalFeesCollected: 0,
+            positionsWithFeesCollected: 0,
+            totalPositions: 0,
+          },
           outOfRange: {
-            found: 0,
-            processed: 0,
-            successful: 0,
-            failed: 0,
-            skipped: 0,
-          },
-          dollarFees: {
-            found: 0,
-            processed: 0,
-            successful: 0,
-            failed: 0,
-            skipped: 0,
-          },
-          imbalanced: {
-            found: 0,
-            processed: 0,
-            successful: 0,
-            failed: 0,
-            skipped: 0,
-          },
-          ageLimit: {
             found: 0,
             processed: 0,
             successful: 0,
@@ -6124,7 +6540,7 @@ export class AerodromeService {
   private async addToWalletQueue(
     walletLocator: string,
     positionId: string,
-    reason: string,
+    reason: 'out_of_range' | 'fee_optimiser',
   ) {
     console.log(
       `Adding position ${positionId} to wallet ${walletLocator} queue`,
@@ -6147,7 +6563,7 @@ export class AerodromeService {
   private async startWalletRebalancing(
     walletLocator: string,
     positionId: string,
-    reason: string,
+    reason: 'out_of_range' | 'fee_optimiser',
   ) {
     console.log(
       `Starting rebalancing for wallet ${walletLocator}, position ${positionId}`,
@@ -6250,10 +6666,16 @@ export class AerodromeService {
       );
 
       // Start rebalancing the next position
-      await this.performRebalance(
-        nextPositionId,
-        position.walletRebalancingQueue.currentReason,
-      );
+      const currentReason = position.walletRebalancingQueue.currentReason;
+      // Validate and convert old reason types to valid ones
+      const validReason =
+        currentReason === 'dollar_fees' ||
+        currentReason === 'imbalanced' ||
+        currentReason === 'age_limit'
+          ? 'out_of_range'
+          : (currentReason as 'out_of_range' | 'fee_optimiser');
+
+      await this.performRebalance(nextPositionId, validReason);
     } else {
       // No more positions in queue, clear the rebalancing state
       await this.clearWalletRebalancingState(walletLocator);
@@ -6399,7 +6821,10 @@ export class AerodromeService {
   /**
    * Perform the actual rebalancing operation
    */
-  private async performRebalance(positionId: string, reason: string) {
+  private async performRebalance(
+    positionId: string,
+    reason: 'out_of_range' | 'fee_optimiser',
+  ) {
     // Add timeout protection for rebalancing operations
     const timeoutMs = 25 * 60 * 1000; // 25 minutes timeout
 
@@ -6412,7 +6837,7 @@ export class AerodromeService {
 
       const rebalancePromise = this.rebalancePositionInternal(
         positionId,
-        reason as 'out_of_range' | 'dollar_fees' | 'imbalanced' | 'age_limit',
+        reason as 'out_of_range' | 'fee_optimiser',
       );
 
       // Race between timeout and actual rebalancing
@@ -6897,6 +7322,491 @@ export class AerodromeService {
         date: date || new Date().toISOString().split('T')[0],
         topPositions: [],
       };
+    }
+  }
+
+  /**
+   * Emergency function to burn all positions for a given wallet address
+   * No database calls - direct blockchain operations only
+   * @param walletAddress The wallet address to burn all positions for
+   * @returns Array of burn results for each position
+   */
+  async emergencyBurnAllPositions(
+    walletAddress: string,
+    tokenId?: string,
+  ): Promise<{
+    success: boolean;
+    message: string;
+    results: Array<{
+      tokenId: string;
+      success: boolean;
+      error?: string;
+      burnResult?: any;
+    }>;
+  }> {
+    try {
+      if (tokenId) {
+        console.log(
+          `=== EMERGENCY BURN SPECIFIC POSITION ${tokenId} FOR ${walletAddress} ===`,
+        );
+      } else {
+        console.log(
+          `=== EMERGENCY BURN ALL POSITIONS FOR ${walletAddress} ===`,
+        );
+      }
+
+      // Get wallet locator from address (assuming walletAddress is the locator)
+      const walletLocator = walletAddress;
+      const actualWalletAddress =
+        this.getWalletAddressFromLocator(walletLocator);
+
+      let positionIds: string[];
+
+      if (tokenId) {
+        // If tokenId is provided, only burn that specific position
+        positionIds = [tokenId];
+        console.log(`Burning specific position: ${tokenId}`);
+      } else {
+        // Get all positions for this wallet from the NonFungiblePositionManager
+        positionIds =
+          await this.getAllPositionIdsForWallet(actualWalletAddress);
+
+        if (positionIds.length === 0) {
+          return {
+            success: true,
+            message: `No positions found for wallet ${actualWalletAddress}`,
+            results: [],
+          };
+        }
+
+        console.log(`Found ${positionIds.length} positions to burn`);
+      }
+
+      const results = [];
+
+      for (const tokenId of positionIds) {
+        try {
+          console.log(`Burning position with tokenId: ${tokenId}`);
+
+          // Step 1: Get current liquidity from the position
+          console.log(`Getting current liquidity for tokenId: ${tokenId}`);
+          const onChainPositionRaw = await this.readContract(
+            this.NON_FUNGIBLE_POSITION_MANAGER_ADDRESS,
+            NonFungiblePositionManagerAbi as unknown as any[],
+            'positions',
+            [tokenId],
+          );
+          const { decodeFunctionResult } = await import('viem');
+          const decoded = decodeFunctionResult({
+            abi: NonFungiblePositionManagerAbi as any,
+            functionName: 'positions',
+            data: onChainPositionRaw,
+          });
+          const liquidity = BigInt(decoded[7]);
+
+          console.log(
+            `Current liquidity for ${tokenId}:`,
+            liquidity.toString(),
+          );
+
+          if (!liquidity || liquidity === 0n) {
+            // If liquidity is already 0, still need to collect any withdrawable tokens before burning
+            console.log(
+              `Position ${tokenId} has zero liquidity, collecting withdrawable tokens before burning`,
+            );
+
+            // Step 3: Collect any withdrawable tokens (even with zero liquidity)
+            console.log(
+              `Collecting withdrawable tokens for tokenId: ${tokenId}`,
+            );
+            const MAX_UINT128 = 2n ** 128n - 1n;
+            const collectFeesResult = await this.sendTransaction(
+              walletLocator,
+              this.NON_FUNGIBLE_POSITION_MANAGER_ADDRESS,
+              NonFungiblePositionManagerAbi as unknown as any[],
+              'collect',
+              [
+                {
+                  tokenId: BigInt(tokenId),
+                  recipient: actualWalletAddress,
+                  amount0Max: MAX_UINT128,
+                  amount1Max: MAX_UINT128,
+                },
+              ],
+            );
+            console.log(
+              `Collect fees result for ${tokenId}:`,
+              collectFeesResult,
+            );
+
+            // Step 4: Burn the position (destroy the NFT)
+            console.log(`Burning position with tokenId: ${tokenId}`);
+            const burnResult = await this.sendTransaction(
+              walletLocator,
+              this.NON_FUNGIBLE_POSITION_MANAGER_ADDRESS,
+              NonFungiblePositionManagerAbi as unknown as any[],
+              'burn',
+              [BigInt(tokenId)],
+            );
+            console.log(`Burn result for ${tokenId}:`, burnResult);
+
+            results.push({
+              tokenId,
+              success: true,
+              burnResult: {
+                liquidity: '0',
+                collectFeesResult,
+                burnResult,
+              },
+            });
+            continue;
+          }
+
+          // Step 2: Decrease liquidity by the actual amount
+          console.log(
+            `Decreasing liquidity by ${liquidity.toString()} for tokenId: ${tokenId}`,
+          );
+          const decreaseParams = {
+            tokenId: BigInt(tokenId),
+            liquidity: BigInt(liquidity),
+            amount0Min: 0,
+            amount1Min: 0,
+            deadline: Math.floor(Date.now() / 1000) + 1800,
+          };
+
+          const decreaseLiquidityResult = await this.sendTransaction(
+            walletLocator,
+            this.NON_FUNGIBLE_POSITION_MANAGER_ADDRESS,
+            NonFungiblePositionManagerAbi as unknown as any[],
+            'decreaseLiquidity',
+            [decreaseParams],
+          );
+          console.log(
+            `Decrease liquidity result for ${tokenId}:`,
+            decreaseLiquidityResult,
+          );
+
+          // Step 3: Collect fees (receive the tokens)
+          console.log(`Collecting fees for tokenId: ${tokenId}`);
+          const MAX_UINT128 = 2n ** 128n - 1n;
+          const collectFeesResult = await this.sendTransaction(
+            walletLocator,
+            this.NON_FUNGIBLE_POSITION_MANAGER_ADDRESS,
+            NonFungiblePositionManagerAbi as unknown as any[],
+            'collect',
+            [
+              {
+                tokenId: BigInt(tokenId),
+                recipient: actualWalletAddress,
+                amount0Max: MAX_UINT128,
+                amount1Max: MAX_UINT128,
+              },
+            ],
+          );
+          console.log(`Collect fees result for ${tokenId}:`, collectFeesResult);
+
+          // Step 4: Burn the position (destroy the NFT)
+          console.log(`Burning position with tokenId: ${tokenId}`);
+          const burnResult = await this.sendTransaction(
+            walletLocator,
+            this.NON_FUNGIBLE_POSITION_MANAGER_ADDRESS,
+            NonFungiblePositionManagerAbi as unknown as any[],
+            'burn',
+            [BigInt(tokenId)],
+          );
+          console.log(`Burn result for ${tokenId}:`, burnResult);
+
+          results.push({
+            tokenId,
+            success: true,
+            burnResult: {
+              liquidity: liquidity.toString(),
+              decreaseLiquidityResult,
+              collectFeesResult,
+              burnResult,
+            },
+          });
+
+          console.log(`✅ Successfully burned position ${tokenId}`);
+        } catch (error) {
+          console.error(`❌ Failed to burn position ${tokenId}:`, error);
+          results.push({
+            tokenId,
+            success: false,
+            error: error.message,
+          });
+        }
+      }
+
+      const successfulBurns = results.filter((r) => r.success).length;
+      const failedBurns = results.filter((r) => !r.success).length;
+
+      console.log(`=== EMERGENCY BURN COMPLETED ===`);
+      console.log(`Successful burns: ${successfulBurns}`);
+      console.log(`Failed burns: ${failedBurns}`);
+      console.log(`Total positions: ${positionIds.length}`);
+
+      return {
+        success: failedBurns === 0,
+        message: `Emergency burn completed. ${successfulBurns} successful, ${failedBurns} failed out of ${positionIds.length} total positions.`,
+        results,
+      };
+    } catch (error) {
+      console.error('Emergency burn failed:', error);
+      return {
+        success: false,
+        message: `Emergency burn failed: ${error.message}`,
+        results: [],
+      };
+    }
+  }
+
+  /**
+   * Get all position token IDs for a given wallet address
+   * @param walletAddress The wallet address
+   * @returns Array of token IDs
+   */
+  /**
+   * Check if a transaction hash exists on-chain
+   * @param transactionHash The transaction hash to check
+   * @returns boolean indicating if transaction exists
+   */
+  private async checkTransactionExists(
+    transactionHash: string,
+  ): Promise<boolean> {
+    try {
+      const alchemyApiKey = this.configService.get<string>(
+        'ALCHEMY_API_KEY_BASE',
+      );
+      if (!alchemyApiKey) {
+        console.warn(
+          'ALCHEMY_API_KEY_BASE not configured, skipping transaction check',
+        );
+        return false;
+      }
+
+      const { createPublicClient, http } = await import('viem');
+      const publicClient = createPublicClient({
+        transport: http(
+          `https://base-mainnet.g.alchemy.com/v2/${alchemyApiKey}`,
+        ),
+        chain: base,
+      });
+
+      const receipt = await publicClient.getTransactionReceipt({
+        hash: transactionHash as `0x${string}`,
+      });
+
+      return !!receipt;
+    } catch (error) {
+      console.warn(
+        `Failed to check transaction ${transactionHash}:`,
+        error.message,
+      );
+      return false;
+    }
+  }
+
+  private async getAllPositionIdsForWallet(
+    walletAddress: string,
+  ): Promise<string[]> {
+    try {
+      console.log(`Getting all position IDs for wallet: ${walletAddress}`);
+
+      // Get balance of positions for this wallet
+      const balanceResult = await this.readContract(
+        this.NON_FUNGIBLE_POSITION_MANAGER_ADDRESS,
+        NonFungiblePositionManagerAbi as unknown as any[],
+        'balanceOf',
+        [walletAddress],
+      );
+
+      const balance = Number(balanceResult);
+      console.log(`Wallet has ${balance} positions`);
+
+      if (balance === 0) {
+        return [];
+      }
+
+      const tokenIds: string[] = [];
+
+      // Get each token ID by index
+      for (let i = 0; i < balance; i++) {
+        try {
+          const tokenIdResult = await this.readContract(
+            this.NON_FUNGIBLE_POSITION_MANAGER_ADDRESS,
+            NonFungiblePositionManagerAbi as unknown as any[],
+            'tokenOfOwnerByIndex',
+            [walletAddress, i],
+          );
+
+          const tokenId = tokenIdResult.toString();
+          tokenIds.push(tokenId);
+          console.log(`Found token ID: ${tokenId}`);
+        } catch (error) {
+          console.error(`Error getting token ID at index ${i}:`, error);
+        }
+      }
+
+      console.log(`Retrieved ${tokenIds.length} token IDs`);
+      return tokenIds;
+    } catch (error) {
+      console.error('Error getting position IDs:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Validates that calculated amounts (collected fees + unused amounts) match actual wallet balances
+   * This helps detect discrepancies in position tracking and calculation logic
+   */
+  private async validateCalculatedAmountsAgainstBalances(
+    positions: any[],
+  ): Promise<void> {
+    try {
+      console.log('=== VALIDATING CALCULATED AMOUNTS AGAINST BALANCES ===');
+
+      // Group positions by wallet
+      const walletPositions = new Map<string, any[]>();
+      for (const position of positions) {
+        const walletLocator = position.walletLocator;
+        if (!walletPositions.has(walletLocator)) {
+          walletPositions.set(walletLocator, []);
+        }
+        walletPositions.get(walletLocator)!.push(position);
+      }
+
+      for (const [walletLocator, walletPositionsList] of walletPositions) {
+        try {
+          const walletAddress = this.getWalletAddressFromLocator(walletLocator);
+          console.log(`Validating wallet: ${walletAddress}`);
+
+          // Get actual wallet balances
+          const [token0BalanceResult, token1BalanceResult] = await Promise.all([
+            this.readContract(
+              '0x4200000000000000000000000000000000000006', // WETH
+              ERC20_ABI as unknown as any[],
+              'balanceOf',
+              [walletAddress],
+            ),
+            this.readContract(
+              '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913', // USDC
+              ERC20_ABI as unknown as any[],
+              'balanceOf',
+              [walletAddress],
+            ),
+          ]);
+
+          // Decode the balance results (they come as hex strings)
+          const actualToken0Balance = BigInt(token0BalanceResult || '0x0');
+          const actualToken1Balance = BigInt(token1BalanceResult || '0x0');
+
+          // Calculate expected amounts from all positions for this wallet
+          let expectedToken0Total = 0n;
+          let expectedToken1Total = 0n;
+
+          for (const position of walletPositionsList) {
+            // Calculate expected amounts: unused amounts + collected fees
+            const amount0Unused = BigInt(
+              position.metadata?.mintDetails?.amount0Unused || '0',
+            );
+            const amount1Unused = BigInt(
+              position.metadata?.mintDetails?.amount1Unused || '0',
+            );
+            const collectedFeesToken0 = BigInt(
+              position.collectedFees?.token0 || '0',
+            );
+            const collectedFeesToken1 = BigInt(
+              position.collectedFees?.token1 || '0',
+            );
+            console.log('collectedFeesToken0', collectedFeesToken0);
+            console.log('collectedFeesToken1', collectedFeesToken1);
+            expectedToken0Total += amount0Unused + collectedFeesToken0;
+            expectedToken1Total += amount1Unused + collectedFeesToken1;
+
+            // Log individual position breakdown for debugging
+            console.log(`Position ${position.positionId} breakdown:`, {
+              amount0Unused: amount0Unused.toString(),
+              collectedFeesToken0: collectedFeesToken0.toString(),
+              amount1Unused: amount1Unused.toString(),
+              collectedFeesToken1: collectedFeesToken1.toString(),
+            });
+          }
+
+          // Compare expected vs actual
+          const token0Difference = expectedToken0Total - actualToken0Balance;
+          const token1Difference = expectedToken1Total - actualToken1Balance;
+
+          const token0DifferencePercent =
+            expectedToken0Total > 0
+              ? Number((token0Difference * 10000n) / expectedToken0Total) / 100
+              : 0;
+          const token1DifferencePercent =
+            expectedToken1Total > 0
+              ? Number((token1Difference * 10000n) / expectedToken1Total) / 100
+              : 0;
+
+          // Log validation results
+          const validationResult = {
+            walletAddress,
+            positions: walletPositionsList.length,
+            expected: {
+              token0: expectedToken0Total.toString(),
+              token1: expectedToken1Total.toString(),
+            },
+            actual: {
+              token0: actualToken0Balance.toString(),
+              token1: actualToken1Balance.toString(),
+            },
+            difference: {
+              token0: token0Difference.toString(),
+              token1: token1Difference.toString(),
+            },
+            differencePercent: {
+              token0: token0DifferencePercent,
+              token1: token1DifferencePercent,
+            },
+            status: {
+              token0:
+                Math.abs(token0DifferencePercent) <= 1 ? 'OK' : 'DISCREPANCY',
+              token1:
+                Math.abs(token1DifferencePercent) <= 1 ? 'OK' : 'DISCREPANCY',
+            },
+          };
+
+          console.log('Validation result:', validationResult);
+
+          // Log warning only for positive discrepancies (actual < expected)
+          if (token0DifferencePercent > 1 || token1DifferencePercent > 1) {
+            console.warn('⚠️ SIGNIFICANT POSITIVE DISCREPANCY DETECTED:', {
+              walletAddress,
+              token0Discrepancy: `${token0DifferencePercent}%`,
+              token1Discrepancy: `${token1DifferencePercent}%`,
+              expectedToken0: expectedToken0Total.toString(),
+              actualToken0: actualToken0Balance.toString(),
+              expectedToken1: expectedToken1Total.toString(),
+              actualToken1: actualToken1Balance.toString(),
+              note: 'Actual balance is lower than expected - investigate potential fund loss',
+            });
+          } else if (
+            token0DifferencePercent < -1 ||
+            token1DifferencePercent < -1
+          ) {
+            console.log('ℹ️ NEGATIVE DISCREPANCY (OK):', {
+              walletAddress,
+              token0Discrepancy: `${token0DifferencePercent}%`,
+              token1Discrepancy: `${token1DifferencePercent}%`,
+              note: 'Actual balance is higher than expected - likely from other sources',
+            });
+          }
+        } catch (error) {
+          console.error(`Error validating wallet ${walletLocator}:`, error);
+        }
+      }
+
+      console.log('=== VALIDATION COMPLETE ===');
+    } catch (error) {
+      console.error('Error in validation:', error);
     }
   }
 }

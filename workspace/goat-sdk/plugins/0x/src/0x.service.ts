@@ -107,7 +107,7 @@ export class ZeroExService {
       sellAmount: parameters.sellAmount,
       taker: walletClient.getAddress(),
       txOrigin: walletClient.getAddress(),
-      slippageBps: (parameters.slippageBps ?? 100).toString(), // Default to 100 BPS (1%) if not provided
+      slippageBps: '30', // Fixed 0.3% slippage
       ...(this.referrer && {
         swapFeeBps: this.referrer.swapFeeBps.toString(),
         swapFeeToken: parameters.sellToken,
@@ -128,7 +128,7 @@ export class ZeroExService {
       sellToken: parameters.sellToken,
       buyToken: parameters.buyToken,
       sellAmount: parameters.sellAmount,
-      slippageBps: parameters.slippageBps ?? 100, // Show the actual value being used
+      slippageBps: 30, // Fixed 0.3% slippage
     });
 
     // Validate that sell and buy tokens are different
@@ -211,7 +211,7 @@ export class ZeroExService {
       sellAmount: parameters.sellAmount,
       taker: walletClient.getAddress(),
       txOrigin: walletClient.getAddress(),
-      slippageBps: (parameters.slippageBps ?? 100).toString(), // Default to 100 BPS (1%) if not provided
+      slippageBps: '30', // Fixed 0.3% slippage
       ...(this.referrer && {
         swapFeeBps: this.referrer.swapFeeBps.toString(),
         swapFeeToken: parameters.sellToken,

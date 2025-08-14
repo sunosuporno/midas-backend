@@ -11,8 +11,9 @@ import { ApiKey, ApiKeySchema } from './schemas/api-key.schema';
 // import { MentionCronService } from './mention-cron.service';
 import { AerodromeRebalancingCronService } from './aerodrome-rebalancing-cron.service';
 import { AerodromePositionTrackingCronService } from './aerodrome-position-tracking-cron.service';
-import { AerodromeFeeOptimiserRebalancingCronService } from './aerodrome-fee-optimiser-rebalancing-cron.service';
-import { AerodromeVolumeBlockCronService } from './aerodrome-volume-block-cron.service';
+// import { AerodromeFeeOptimiserRebalancingCronService } from './aerodrome-fee-optimiser-rebalancing-cron.service';
+// import { AerodromeFeeOptimiserV2RebalancingCronService } from './aerodrome-fee-optimiser-v2-rebalancing-cron.service';
+// import { AerodromeVolumeBlockCronService } from './aerodrome-volume-block-cron.service';
 import { User, UserSchema } from './schemas/user.schema';
 import { PendingTip, PendingTipSchema } from './schemas/pending-tip.schema';
 import { AerodromeController } from './aerodrome/aerodrome.controller';
@@ -59,8 +60,9 @@ import {
     // MentionCronService,
     AerodromeRebalancingCronService,
     AerodromePositionTrackingCronService,
-    AerodromeFeeOptimiserRebalancingCronService,
-    AerodromeVolumeBlockCronService,
+    // AerodromeFeeOptimiserRebalancingCronService,
+    // AerodromeFeeOptimiserV2RebalancingCronService,
+    // AerodromeVolumeBlockCronService,
     AerodromeSubgraphService,
   ],
 })

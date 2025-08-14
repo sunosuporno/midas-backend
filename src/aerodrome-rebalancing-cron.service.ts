@@ -3,8 +3,9 @@
  *
  * This service implements dynamic scheduling for rebalancing operations:
  *
- * - Instead of fixed 2-minute intervals, the next rebalancing run starts
- *   10 minutes after the previous run completes
+ * - Collects fees from ALL active positions on every run (regardless of rebalancing needs)
+ * - Only rebalances positions that are out-of-range (current tick outside position's tick range)
+ * - Instead of fixed intervals, the next rebalancing run starts 10 minutes after the previous run completes
  *
  * - If no positions need rebalancing and the job completes in 2 minutes,
  *   the next run will be in 10 minutes (12 minutes total from last invocation)
