@@ -842,6 +842,78 @@ export class AerodromeService {
     );
   }
 
+  /**
+   * Helper function to get the actual buy amount from Transfer events in a transaction receipt
+   */
+  private async getBuyAmountFromTransferEvents(
+    transactionHash: string,
+    buyTokenAddress: string,
+    walletAddress: string,
+  ): Promise<bigint> {
+    const alchemyApiKey = this.configService.get<string>(
+      'ALCHEMY_API_KEY_BASE',
+    );
+    const { createPublicClient, http, decodeEventLog } = await import('viem');
+
+    const publicClient = createPublicClient({
+      transport: http(alchemyApiKey),
+      chain: base,
+    });
+
+    const receipt = await publicClient.getTransactionReceipt({
+      hash: transactionHash as `0x${string}`,
+    });
+
+    console.log('Transaction receipt logs:', receipt.logs.length);
+
+    let totalBuyAmount = BigInt(0);
+
+    // ERC20 Transfer event topic - use viem's built-in hashing
+    const { keccak256, toHex } = await import('viem');
+    const transferEventTopic = keccak256(
+      toHex('Transfer(address,address,uint256)'),
+    );
+
+    for (const log of receipt.logs) {
+      try {
+        // Check if this is a Transfer event for the buy token
+        if (
+          log.address.toLowerCase() === buyTokenAddress.toLowerCase() &&
+          (log as any).topics?.[0] === transferEventTopic
+        ) {
+          const event = decodeEventLog({
+            abi: ERC20_ABI as any,
+            data: (log as any).data,
+            topics: (log as any).topics,
+          }) as any;
+
+          console.log('Decoded Transfer event:', {
+            from: event.args.from,
+            to: event.args.to,
+            value: event.args.value.toString(),
+          });
+
+          // Check if this transfer is TO our wallet
+          if (event.args.to.toLowerCase() === walletAddress.toLowerCase()) {
+            totalBuyAmount += BigInt(event.args.value);
+            console.log(
+              'Found transfer TO wallet:',
+              event.args.value.toString(),
+            );
+          }
+        }
+      } catch (error) {
+        console.log('Failed to decode log:', error.message);
+      }
+    }
+
+    console.log(
+      'Total buy amount from Transfer events:',
+      totalBuyAmount.toString(),
+    );
+    return totalBuyAmount;
+  }
+
   private getWalletAddressFromLocator(walletLocator: string): string {
     // Extract wallet address from wallet locator
     // Wallet locator format is typically: "evm-base:0x..."
@@ -1561,14 +1633,16 @@ export class AerodromeService {
         }
       }
 
-      // Extract important details from mintResult
+      // Extract important details from mintResult and decodedMintDetails
       const {
-        tokenId,
         liquidity,
         amount0,
         amount1,
         transactionHash: mintTxHash,
       } = mintResult || {};
+
+      // Get tokenId from decodedMintDetails (transaction receipt) or mintResult
+      const tokenId = decodedMintDetails?.tokenId || mintResult?.tokenId;
 
       // Calculate unused amounts (amount0Desired - amount0, amount1Desired - amount1)
       function sanitizeBigIntString(val: any): string {
@@ -1627,6 +1701,38 @@ export class AerodromeService {
       });
 
       // Validate that mint actually succeeded with non-zero amounts and valid tokenId
+      console.log('🔍 Starting mint validation...');
+      console.log('Validation inputs:', {
+        actualAmount0,
+        actualAmount1,
+        tokenId,
+        decodedMintDetails: decodedMintDetails
+          ? {
+              tokenId: decodedMintDetails.tokenId,
+              liquidity: decodedMintDetails.liquidity,
+              amount0: decodedMintDetails.amount0,
+              amount1: decodedMintDetails.amount1,
+            }
+          : null,
+        mintResult: mintResult
+          ? {
+              tokenId: mintResult.tokenId,
+              liquidity: mintResult.liquidity,
+              amount0: mintResult.amount0,
+              amount1: mintResult.amount1,
+              transactionHash: mintResult.transactionHash,
+            }
+          : null,
+      });
+
+      const validationChecks = {
+        actualAmount0Valid: actualAmount0 && actualAmount0 !== '0',
+        actualAmount1Valid: actualAmount1 && actualAmount1 !== '0',
+        tokenIdValid: !!tokenId,
+      };
+
+      console.log('Validation check results:', validationChecks);
+
       if (
         !actualAmount0 ||
         actualAmount0 === '0' ||
@@ -1642,6 +1748,7 @@ export class AerodromeService {
           amount1Desired,
           tokenId,
           positionId,
+          validationChecks,
         });
 
         // Mark position as failed
@@ -1666,6 +1773,13 @@ export class AerodromeService {
       }
 
       console.log('✅ Mint validation passed - position has non-zero amounts');
+      console.log('✅ Validation summary:', {
+        tokenId,
+        actualAmount0,
+        actualAmount1,
+        liquidity,
+        transactionHash: mintTxHash || mintResult?.transactionHash,
+      });
 
       // Update DB with mint result and important details
       await this.aerodromePositionModel.findOneAndUpdate(
@@ -2204,6 +2318,9 @@ export class AerodromeService {
       token1Swap: null,
     };
 
+    let amount0Used = BigInt(0);
+    let amount1Used = BigInt(0);
+
     // Determine if we need to swap and in which direction
     if (Math.abs(token0Difference) > 0.01) {
       // Small threshold to avoid dust
@@ -2226,12 +2343,16 @@ export class AerodromeService {
         });
 
         // Perform the swap: token0 to token1
-        const { txResult } = await this.swapTokens(
+        const { buyAmount, txResult } = await this.swapTokens(
           createAerodromeLpDto.walletLocator,
           poolConfig.token0,
           poolConfig.token1,
           sellAmountToken0.toString(),
         );
+
+        console.log('Buy amount:', buyAmount);
+        amount0Used = BigInt(buyAmount) + B;
+        console.log('Amount0 used:', amount0Used.toString());
 
         swapResults.token0Swap = {
           transactionHash: txResult.transactionHash,
@@ -2256,12 +2377,16 @@ export class AerodromeService {
         });
 
         // Perform the swap: token1 to token0
-        const { txResult } = await this.swapTokens(
+        const { buyAmount, txResult } = await this.swapTokens(
           createAerodromeLpDto.walletLocator,
           poolConfig.token1,
           poolConfig.token0,
           sellAmountToken1.toString(),
         );
+
+        console.log('Buy amount:', buyAmount);
+        amount1Used = BigInt(buyAmount) + A;
+        console.log('Amount1 used:', amount1Used.toString());
 
         swapResults.token1Swap = {
           transactionHash: txResult.transactionHash,
@@ -2272,9 +2397,9 @@ export class AerodromeService {
       console.log('No rebalancing needed, amounts are close enough');
     }
 
-    // For now, use the calculated amounts (a and b) as the target amounts
-    const amount0Used = a;
-    const amount1Used = b;
+    // // For now, use the calculated amounts (a and b) as the target amounts
+    // const amount0Used = a;
+    // const amount1Used = b;
 
     console.log('Final amounts to use:', {
       amount0Used: amount0Used.toString(),
@@ -4887,88 +5012,35 @@ export class AerodromeService {
     console.log('Expected Buy Amount:', swapQuote.buyAmount);
     console.log('Transaction Status:', txResult?.status);
 
-    // Verify the swap actually worked by checking balance changes
+    // Get the actual buy amount from Transfer events
+    let buyBalanceChange = BigInt(0);
+
     if (txResult?.status === 'success') {
       // Wait a bit for the transaction to be processed
       await new Promise((resolve) => setTimeout(resolve, 2000));
 
-      // Get post-swap balances
-      const postSwapSellBalance = await this.readContract(
-        sellToken,
-        ERC20_ABI as unknown as any[],
-        'balanceOf',
-        [walletAddress],
-      );
-
-      const postSwapBuyBalance = await this.readContract(
+      // Get the actual buy amount from Transfer events
+      buyBalanceChange = await this.getBuyAmountFromTransferEvents(
+        txResult.transactionHash,
         buyToken,
-        ERC20_ABI as unknown as any[],
-        'balanceOf',
-        [walletAddress],
+        walletAddress,
       );
 
-      const decodedPostSwapSellBalance = decodeFunctionResult({
-        abi: ERC20_ABI as any,
-        functionName: 'balanceOf',
-        data: postSwapSellBalance,
-      });
-
-      const decodedPostSwapBuyBalance = decodeFunctionResult({
-        abi: ERC20_ABI as any,
-        functionName: 'balanceOf',
-        data: postSwapBuyBalance,
-      });
-
-      console.log('Post-swap balances:');
-      console.log('Sell token balance:', decodedPostSwapSellBalance.toString());
-      console.log('Buy token balance:', decodedPostSwapBuyBalance.toString());
-
-      // Calculate balance changes
-      const sellBalanceChange =
-        BigInt(decodedPreSwapSellBalance.toString()) -
-        BigInt(decodedPostSwapSellBalance.toString());
-      const buyBalanceChange =
-        BigInt(decodedPostSwapBuyBalance.toString()) -
-        BigInt(decodedPreSwapBuyBalance.toString());
-
-      console.log('Balance changes:');
-      console.log('Sell token change:', sellBalanceChange.toString());
-      console.log('Buy token change:', buyBalanceChange.toString());
-      console.log('Expected sell amount:', sellAmountRaw);
+      console.log(
+        'Buy amount from Transfer events:',
+        buyBalanceChange.toString(),
+      );
       console.log('Expected min buy amount:', swapQuote.minBuyAmount);
 
-      // Verify that either:
-      // 1. Sell token balance decreased by expected amount (with tolerance), OR
-      // 2. Buy token balance increased by at least the minimum expected amount
-      const expectedSellAmount = BigInt(sellAmountRaw);
+      // Verify that we received at least the minimum expected amount
       const expectedMinBuyAmount = BigInt(swapQuote.minBuyAmount);
-      const sellTolerance = (expectedSellAmount * BigInt(5)) / BigInt(1000); // 0.5% tolerance
-      const minExpectedSellChange = expectedSellAmount - sellTolerance;
-      const maxExpectedSellChange = expectedSellAmount + sellTolerance;
-
-      console.log('Verification thresholds:');
-      console.log(
-        'Min expected sell change:',
-        minExpectedSellChange.toString(),
-      );
-      console.log(
-        'Max expected sell change:',
-        maxExpectedSellChange.toString(),
-      );
-      console.log('Min expected buy change:', expectedMinBuyAmount.toString());
-
-      const sellAmountCheck =
-        sellBalanceChange >= minExpectedSellChange &&
-        sellBalanceChange <= maxExpectedSellChange;
-
       const buyAmountCheck = buyBalanceChange >= expectedMinBuyAmount;
 
       console.log('Verification results:');
-      console.log('Sell amount check passed:', sellAmountCheck);
       console.log('Buy amount check passed:', buyAmountCheck);
 
-      if (!sellAmountCheck && !buyAmountCheck) {
-        const errorMessage = `0x swap transaction succeeded but neither sell nor buy token balance changed as expected. Transaction hash: ${txResult?.transactionHash}. Expected sell change: ${expectedSellAmount} (±${sellTolerance}), Actual sell change: ${sellBalanceChange}, Expected min buy change: ${expectedMinBuyAmount}, Actual buy change: ${buyBalanceChange}`;
+      if (!buyAmountCheck) {
+        const errorMessage = `0x swap transaction succeeded but buy amount is below minimum. Transaction hash: ${txResult?.transactionHash}. Expected min buy change: ${expectedMinBuyAmount}, Actual buy change: ${buyBalanceChange}`;
         console.error('=== SWAP VERIFICATION FAILED ===');
         console.error(errorMessage);
         throw new Error(errorMessage);
@@ -4978,7 +5050,8 @@ export class AerodromeService {
       console.log('Token transfer confirmed. Swap was successful.');
     }
 
-    return { buyAmount: swapQuote.buyAmount, txResult };
+    // Return the actual buy amount received (buyBalanceChange) instead of the quoted amount
+    return { buyAmount: buyBalanceChange.toString(), txResult };
   }
 
   /**
@@ -5071,96 +5144,40 @@ export class AerodromeService {
       );
       console.log('Transaction Status:', txResult?.status);
 
-      // Verify the swap actually worked by checking balance changes
+      // Get the actual buy amount from Transfer events
+      let buyBalanceChange = BigInt(0);
+
       if (txResult?.status === 'success') {
         // Wait a bit for the transaction to be processed
         await new Promise((resolve) => setTimeout(resolve, 2000));
 
-        // Get post-swap balances
-        const postSwapSellBalance = await this.readContract(
-          sellToken,
-          ERC20_ABI as unknown as any[],
-          'balanceOf',
-          [walletAddress],
-        );
-
-        const postSwapBuyBalance = await this.readContract(
+        // Get the actual buy amount from Transfer events
+        buyBalanceChange = await this.getBuyAmountFromTransferEvents(
+          txResult.transactionHash,
           buyToken,
-          ERC20_ABI as unknown as any[],
-          'balanceOf',
-          [walletAddress],
+          walletAddress,
         );
 
-        const decodedPostSwapSellBalance = decodeFunctionResult({
-          abi: ERC20_ABI as any,
-          functionName: 'balanceOf',
-          data: postSwapSellBalance,
-        });
-
-        const decodedPostSwapBuyBalance = decodeFunctionResult({
-          abi: ERC20_ABI as any,
-          functionName: 'balanceOf',
-          data: postSwapBuyBalance,
-        });
-
-        console.log('Post-swap balances:');
         console.log(
-          'Sell token balance:',
-          decodedPostSwapSellBalance.toString(),
+          'Buy amount from Transfer events:',
+          buyBalanceChange.toString(),
         );
-        console.log('Buy token balance:', decodedPostSwapBuyBalance.toString());
-
-        // Calculate balance changes
-        const sellBalanceChange =
-          BigInt(decodedPreSwapSellBalance.toString()) -
-          BigInt(decodedPostSwapSellBalance.toString());
-        const buyBalanceChange =
-          BigInt(decodedPostSwapBuyBalance.toString()) -
-          BigInt(decodedPreSwapBuyBalance.toString());
-
-        console.log('Balance changes:');
-        console.log('Sell token change:', sellBalanceChange.toString());
-        console.log('Buy token change:', buyBalanceChange.toString());
-        console.log('Expected sell amount:', sellAmountRaw);
         console.log(
           'Expected buy amount:',
           swapResponse.dstAmount || swapResponse.toTokenAmount,
         );
 
-        // Verify that either:
-        // 1. Sell token balance decreased by expected amount (with tolerance), OR
-        // 2. Buy token balance increased by at least the expected amount
-        const expectedSellAmount = BigInt(sellAmountRaw);
+        // Verify that we received at least the expected amount
         const expectedBuyAmount = BigInt(
           swapResponse.dstAmount || swapResponse.toTokenAmount || '0',
         );
-        const sellTolerance = (expectedSellAmount * BigInt(5)) / BigInt(1000); // 0.5% tolerance
-        const minExpectedSellChange = expectedSellAmount - sellTolerance;
-        const maxExpectedSellChange = expectedSellAmount + sellTolerance;
-
-        console.log('Verification thresholds:');
-        console.log(
-          'Min expected sell change:',
-          minExpectedSellChange.toString(),
-        );
-        console.log(
-          'Max expected sell change:',
-          maxExpectedSellChange.toString(),
-        );
-        console.log('Expected buy change:', expectedBuyAmount.toString());
-
-        const sellAmountCheck =
-          sellBalanceChange >= minExpectedSellChange &&
-          sellBalanceChange <= maxExpectedSellChange;
-
         const buyAmountCheck = buyBalanceChange >= expectedBuyAmount;
 
         console.log('Verification results:');
-        console.log('Sell amount check passed:', sellAmountCheck);
         console.log('Buy amount check passed:', buyAmountCheck);
 
-        if (!sellAmountCheck && !buyAmountCheck) {
-          const errorMessage = `1inch swap transaction succeeded but neither sell nor buy token balance changed as expected. Transaction hash: ${txResult?.transactionHash}. Expected sell change: ${expectedSellAmount} (±${sellTolerance}), Actual sell change: ${sellBalanceChange}, Expected buy change: ${expectedBuyAmount}, Actual buy change: ${buyBalanceChange}`;
+        if (!buyAmountCheck) {
+          const errorMessage = `1inch swap transaction succeeded but buy amount is below expected. Transaction hash: ${txResult?.transactionHash}. Expected buy change: ${expectedBuyAmount}, Actual buy change: ${buyBalanceChange}`;
           console.error('=== SWAP VERIFICATION FAILED ===');
           console.error(errorMessage);
           throw new Error(errorMessage);
@@ -5170,7 +5187,8 @@ export class AerodromeService {
         console.log('Token transfer confirmed. Swap was successful.');
       }
 
-      return { buyAmount: swapResponse.dstAmount || sellAmountRaw, txResult };
+      // Return the actual buy amount received (buyBalanceChange) instead of the quoted amount
+      return { buyAmount: buyBalanceChange.toString(), txResult };
     } catch (error) {
       console.error('1inch swap failed:', error);
 
@@ -5281,87 +5299,34 @@ export class AerodromeService {
     console.log('Transaction Hash:', txResult?.transactionHash);
     console.log('Transaction Status:', txResult?.status);
 
-    // Verify the swap actually worked by checking balance changes
+    // Get the actual buy amount from Transfer events
+    let buyBalanceChange = BigInt(0);
+
     if (txResult?.status === 'success') {
       // Wait a bit for the transaction to be processed
       await new Promise((resolve) => setTimeout(resolve, 2000));
 
-      // Get post-swap balances
-      const postSwapSellBalance = await this.readContract(
-        sellToken,
-        ERC20_ABI as unknown as any[],
-        'balanceOf',
-        [walletAddress],
-      );
-
-      const postSwapBuyBalance = await this.readContract(
+      // Get the actual buy amount from Transfer events
+      buyBalanceChange = await this.getBuyAmountFromTransferEvents(
+        txResult.transactionHash,
         buyToken,
-        ERC20_ABI as unknown as any[],
-        'balanceOf',
-        [walletAddress],
+        walletAddress,
       );
 
-      const decodedPostSwapSellBalance = decodeFunctionResult({
-        abi: ERC20_ABI as any,
-        functionName: 'balanceOf',
-        data: postSwapSellBalance,
-      });
+      console.log(
+        'Buy amount from Transfer events:',
+        buyBalanceChange.toString(),
+      );
 
-      const decodedPostSwapBuyBalance = decodeFunctionResult({
-        abi: ERC20_ABI as any,
-        functionName: 'balanceOf',
-        data: postSwapBuyBalance,
-      });
-
-      console.log('Post-swap balances:');
-      console.log('Sell token balance:', decodedPostSwapSellBalance.toString());
-      console.log('Buy token balance:', decodedPostSwapBuyBalance.toString());
-
-      // Calculate balance changes
-      const sellBalanceChange =
-        BigInt(decodedPreSwapSellBalance.toString()) -
-        BigInt(decodedPostSwapSellBalance.toString());
-      const buyBalanceChange =
-        BigInt(decodedPostSwapBuyBalance.toString()) -
-        BigInt(decodedPreSwapBuyBalance.toString());
-
-      console.log('Balance changes:');
-      console.log('Sell token change:', sellBalanceChange.toString());
-      console.log('Buy token change:', buyBalanceChange.toString());
-      console.log('Expected sell amount:', sellAmountRaw);
-
-      // Verify that either:
-      // 1. Sell token balance decreased by expected amount (with tolerance), OR
-      // 2. Buy token balance increased by some reasonable amount
-      const expectedSellAmount = BigInt(sellAmountRaw);
-      const sellTolerance = (expectedSellAmount * BigInt(5)) / BigInt(1000); // 0.5% tolerance
-      const minExpectedSellChange = expectedSellAmount - sellTolerance;
-      const maxExpectedSellChange = expectedSellAmount + sellTolerance;
+      // Verify that we received some reasonable amount
       const minExpectedBuyChange = BigInt(1000); // Minimum 1000 wei increase for buy token
-
-      console.log('Verification thresholds:');
-      console.log(
-        'Min expected sell change:',
-        minExpectedSellChange.toString(),
-      );
-      console.log(
-        'Max expected sell change:',
-        maxExpectedSellChange.toString(),
-      );
-      console.log('Min expected buy change:', minExpectedBuyChange.toString());
-
-      const sellAmountCheck =
-        sellBalanceChange >= minExpectedSellChange &&
-        sellBalanceChange <= maxExpectedSellChange;
-
       const buyAmountCheck = buyBalanceChange >= minExpectedBuyChange;
 
       console.log('Verification results:');
-      console.log('Sell amount check passed:', sellAmountCheck);
       console.log('Buy amount check passed:', buyAmountCheck);
 
-      if (!sellAmountCheck && !buyAmountCheck) {
-        const errorMessage = `Alternative 1inch swap transaction succeeded but neither sell nor buy token balance changed as expected. Transaction hash: ${txResult?.transactionHash}. Expected sell change: ${expectedSellAmount} (±${sellTolerance}), Actual sell change: ${sellBalanceChange}, Expected min buy change: ${minExpectedBuyChange}, Actual buy change: ${buyBalanceChange}`;
+      if (!buyAmountCheck) {
+        const errorMessage = `Alternative 1inch swap transaction succeeded but buy amount is below minimum. Transaction hash: ${txResult?.transactionHash}. Expected min buy change: ${minExpectedBuyChange}, Actual buy change: ${buyBalanceChange}`;
         console.error('=== SWAP VERIFICATION FAILED ===');
         console.error(errorMessage);
         throw new Error(errorMessage);
@@ -5371,9 +5336,8 @@ export class AerodromeService {
       console.log('Token transfer confirmed. Swap was successful.');
     }
 
-    // For the alternative method, we don't have the exact buy amount
-    // We'll use the sell amount as a fallback
-    return { buyAmount: sellAmountRaw, txResult };
+    // Return the actual buy amount received (buyBalanceChange) instead of the quoted amount
+    return { buyAmount: buyBalanceChange.toString(), txResult };
   }
 
   // === POSITION ANALYSIS METHODS ===
