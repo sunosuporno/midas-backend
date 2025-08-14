@@ -1626,6 +1626,47 @@ export class AerodromeService {
         ).toString(),
       });
 
+      // Validate that mint actually succeeded with non-zero amounts and valid tokenId
+      if (
+        !actualAmount0 ||
+        actualAmount0 === '0' ||
+        !actualAmount1 ||
+        actualAmount1 === '0' ||
+        !tokenId
+      ) {
+        console.log('❌ Mint validation failed - missing required data');
+        console.log('Mint validation details:', {
+          actualAmount0,
+          actualAmount1,
+          amount0Desired,
+          amount1Desired,
+          tokenId,
+          positionId,
+        });
+
+        // Mark position as failed
+        await this.aerodromePositionModel.findOneAndUpdate(
+          { positionId },
+          { status: 'mint_failed' },
+        );
+
+        // Call cleanup with retry enabled
+        console.log('🔄 Initiating cleanup and retry for failed mint...');
+        await this.cleanupFailedMint(
+          positionId,
+          actualAmount0,
+          actualAmount1,
+          true,
+        );
+
+        throw new HttpException(
+          `Mint failed - missing tokenId or zero amounts. Cleanup and retry initiated.`,
+          400,
+        );
+      }
+
+      console.log('✅ Mint validation passed - position has non-zero amounts');
+
       // Update DB with mint result and important details
       await this.aerodromePositionModel.findOneAndUpdate(
         { positionId },
@@ -4436,8 +4477,25 @@ export class AerodromeService {
       // Step 1: Burn the old position (this will also collect any remaining fees)
       console.log('Step 1: Burning old position...');
       const tokenId = position.metadata?.mintDetails?.tokenId;
+
+      // Validate that we have the required tokenId before proceeding
+      if (!tokenId) {
+        throw new HttpException(
+          `Position ${positionId} missing required tokenId in metadata. Position may be corrupted or incomplete.`,
+          400,
+        );
+      }
+
       const burnResult = await this.burn(position.walletLocator, tokenId, true); // Pass isRebalance=true
       console.log('Burn result:', burnResult);
+
+      // Validate burn result before proceeding
+      if (!burnResult) {
+        throw new HttpException(
+          `Burn operation failed for position ${positionId} - no result returned`,
+          500,
+        );
+      }
 
       // Step 3: Use the token amounts from burn result for rebalancing
       const originalUsdcAmount = position.usdcAmount;
@@ -4446,7 +4504,8 @@ export class AerodromeService {
       // For rebalance, use the stored token amounts instead of USDC amount
       const newUsdcAmount =
         burnResult.tokenAmountsForRebalance?.totalUSDValue ||
-        burnResult.withdrawAmountFinal;
+        burnResult.withdrawAmountFinal ||
+        0;
 
       console.log('Rebalance calculation:', {
         original: originalUsdcAmount,
