@@ -345,6 +345,71 @@ export class AerodromeService {
     return this.get0xPrice(sellToken, buyToken, sellAmount, dummyWalletAddress);
   }
 
+  async testCalculateTokenAmounts(poolName: string, usdcAmount: number) {
+    console.log('=== Testing calculateTokenAmounts ===');
+    console.log('Pool:', poolName);
+    console.log('USDC Amount:', usdcAmount);
+
+    try {
+      // Get pool config
+      const poolConfig = getPoolConfig(poolName);
+      if (!poolConfig) {
+        throw new Error(`Pool not found: ${poolName}`);
+      }
+
+      console.log('Pool config:', poolConfig);
+
+      // Call the calculateTokenAmounts function
+      const result = await this.calculateTokenAmounts(poolConfig, usdcAmount);
+
+      console.log('Test result:', result);
+      return {
+        poolName,
+        usdcAmount,
+        poolConfig: {
+          name: poolConfig.name,
+          token0: poolConfig.token0,
+          token1: poolConfig.token1,
+          token0Name: poolConfig.token0Name,
+          token1Name: poolConfig.token1Name,
+          token0Decimals: poolConfig.token0Decimals,
+          token1Decimals: poolConfig.token1Decimals,
+        },
+        result,
+      };
+    } catch (error) {
+      console.error('Error in testCalculateTokenAmounts:', error);
+      throw new Error(`Test failed: ${error.message}`);
+    }
+  }
+
+  private async getTokenPriceForSwap(
+    tokenAddress: string,
+    tokenName: string,
+    tokenDecimals: number,
+  ): Promise<number> {
+    if (tokenAddress === this.USDC_ADDRESS) {
+      return 1.0; // USDC price is always $1.00
+    } else {
+      // Use 0x pricing for any non-USDC token
+      console.log(`Using 0x pricing for swap calculation (${tokenName})`);
+
+      // Get 1 token in wei (using token decimals)
+      const oneTokenInWei = (10 ** tokenDecimals).toString();
+
+      const oxResponse = await this.get0xPriceForEndpoint(
+        tokenAddress, // Use token address
+        this.USDC_ADDRESS, // Use existing USDC address
+        oneTokenInWei,
+      );
+
+      const oxBuyAmount = BigInt(oxResponse.buyAmount);
+      const price = Number(oxBuyAmount) / 1e6; // USDC has 6 decimals
+      console.log(`0x price for ${tokenName}: $${price}`);
+      return price;
+    }
+  }
+
   private async get0xPrice(
     sellToken: string,
     buyToken: string,
@@ -1189,7 +1254,11 @@ export class AerodromeService {
         let token0SwapResult = null;
         if (poolConfig.token0 !== this.USDC_ADDRESS) {
           // Calculate the required USDC sell amount for token0
-          const token0Price = await this.getTokenPrice(poolConfig.token0Name);
+          const token0Price = await this.getTokenPriceForSwap(
+            poolConfig.token0,
+            poolConfig.token0Name,
+            poolConfig.token0Decimals,
+          );
           const token0AmountHuman =
             Number(liquidityAmounts.usedAmounts.token0.rawAmount) /
             Math.pow(10, poolConfig.token0Decimals);
@@ -1213,7 +1282,11 @@ export class AerodromeService {
         // Step 4: Check if token1 needs USDC swap
         let token1SwapResult = null;
         if (poolConfig.token1 !== this.USDC_ADDRESS) {
-          const token1Price = await this.getTokenPrice(poolConfig.token1Name);
+          const token1Price = await this.getTokenPriceForSwap(
+            poolConfig.token1,
+            poolConfig.token1Name,
+            poolConfig.token1Decimals,
+          );
           const token1AmountHuman =
             Number(liquidityAmounts.usedAmounts.token1.rawAmount) /
             Math.pow(10, poolConfig.token1Decimals);
@@ -2030,10 +2103,18 @@ export class AerodromeService {
     let token1Price = 1; // USDC is always $1
 
     if (poolConfig.token0 !== this.USDC_ADDRESS) {
-      token0Price = await this.getTokenPrice(poolConfig.token0Name);
+      token0Price = await this.getTokenPriceForSwap(
+        poolConfig.token0,
+        poolConfig.token0Name,
+        poolConfig.token0Decimals,
+      );
     }
     if (poolConfig.token1 !== this.USDC_ADDRESS) {
-      token1Price = await this.getTokenPrice(poolConfig.token1Name);
+      token1Price = await this.getTokenPriceForSwap(
+        poolConfig.token1,
+        poolConfig.token1Name,
+        poolConfig.token1Decimals,
+      );
     }
 
     console.log('Current token prices:', {
@@ -2271,16 +2352,46 @@ export class AerodromeService {
       token0Price = 1.0; // USDC price is always $1.00
       console.log('Token0 is USDC, price: $1.00');
     } else {
-      // Get token0 price from Pyth using token0Name from pool config
-      token0Price = await this.getTokenPrice(poolConfig.token0Name);
+      // Use 0x pricing for any non-USDC token
+      console.log(`Using 0x pricing for token0 (${poolConfig.token0Name})`);
+
+      // Get 1 token0 in wei (using token0 decimals from pool config)
+      const oneToken0InWei = (10 ** poolConfig.token0Decimals).toString();
+
+      const oxResponse = await this.get0xPriceForEndpoint(
+        poolConfig.token0, // Use token0 address from pool config
+        this.USDC_ADDRESS, // Use existing USDC address
+        oneToken0InWei,
+      );
+
+      const oxBuyAmount = BigInt(oxResponse.buyAmount);
+      token0Price = Number(oxBuyAmount) / 1e6; // USDC has 6 decimals
+      console.log(
+        `0x price for token0 (${poolConfig.token0Name}): $${token0Price}`,
+      );
     }
 
     if (poolConfig.token1 === this.USDC_ADDRESS) {
       token1Price = 1.0; // USDC price is always $1.00
       console.log('Token1 is USDC, price: $1.00');
     } else {
-      // Get token1 price from Pyth using token1Name from pool config
-      token1Price = await this.getTokenPrice(poolConfig.token1Name);
+      // Use 0x pricing for any non-USDC token
+      console.log(`Using 0x pricing for token1 (${poolConfig.token1Name})`);
+
+      // Get 1 token1 in wei (using token1 decimals from pool config)
+      const oneToken1InWei = (10 ** poolConfig.token1Decimals).toString();
+
+      const oxResponse = await this.get0xPriceForEndpoint(
+        poolConfig.token1, // Use token1 address from pool config
+        this.USDC_ADDRESS, // Use existing USDC address
+        oneToken1InWei,
+      );
+
+      const oxBuyAmount = BigInt(oxResponse.buyAmount);
+      token1Price = Number(oxBuyAmount) / 1e6; // USDC has 6 decimals
+      console.log(
+        `0x price for token1 (${poolConfig.token1Name}): $${token1Price}`,
+      );
     }
 
     console.log('Token prices:', {
@@ -3347,6 +3458,47 @@ export class AerodromeService {
           actualReceivedToken1: actualReceivedToken1.toString(),
         });
 
+        // Get token prices once to avoid redundancy
+        let token0Price = 1.0; // USDC is always $1
+        let token1Price = 1.0; // USDC is always $1
+
+        if (poolConfig.token0 !== this.USDC_ADDRESS) {
+          try {
+            token0Price = await this.getTokenPriceForSwap(
+              poolConfig.token0,
+              poolConfig.token0Name,
+              poolConfig.token0Decimals,
+            );
+          } catch (error) {
+            console.error(
+              `Failed to get price for ${poolConfig.token0Name}:`,
+              error,
+            );
+            token0Price = 0;
+          }
+        }
+
+        if (poolConfig.token1 !== this.USDC_ADDRESS) {
+          try {
+            token1Price = await this.getTokenPriceForSwap(
+              poolConfig.token1,
+              poolConfig.token1Name,
+              poolConfig.token1Decimals,
+            );
+          } catch (error) {
+            console.error(
+              `Failed to get price for ${poolConfig.token1Name}:`,
+              error,
+            );
+            token1Price = 0;
+          }
+        }
+
+        console.log('Token prices for rebalance:', {
+          token0Price,
+          token1Price,
+        });
+
         // Calculate USD values for the stored amounts (similar to cleanupFailedMint)
         let token0USDValue = 0;
         let token1USDValue = 0;
@@ -3355,38 +3507,20 @@ export class AerodromeService {
           token0USDValue =
             Number(rebalanceToken0Amount) / Math.pow(10, this.USDC_DECIMALS);
         } else {
-          try {
-            const token0Price = await this.getTokenPrice(poolConfig.token0Name);
-            token0USDValue =
-              (Number(rebalanceToken0Amount) /
-                Math.pow(10, poolConfig.token0Decimals)) *
-              token0Price;
-          } catch (error) {
-            console.error(
-              `Failed to get price for ${poolConfig.token0Name}:`,
-              error,
-            );
-            token0USDValue = 0;
-          }
+          token0USDValue =
+            (Number(rebalanceToken0Amount) /
+              Math.pow(10, poolConfig.token0Decimals)) *
+            token0Price;
         }
 
         if (poolConfig.token1 === this.USDC_ADDRESS) {
           token1USDValue =
             Number(rebalanceToken1Amount) / Math.pow(10, this.USDC_DECIMALS);
         } else {
-          try {
-            const token1Price = await this.getTokenPrice(poolConfig.token1Name);
-            token1USDValue =
-              (Number(rebalanceToken1Amount) /
-                Math.pow(10, poolConfig.token1Decimals)) *
-              token1Price;
-          } catch (error) {
-            console.error(
-              `Failed to get price for ${poolConfig.token1Name}:`,
-              error,
-            );
-            token1USDValue = 0;
-          }
+          token1USDValue =
+            (Number(rebalanceToken1Amount) /
+              Math.pow(10, poolConfig.token1Decimals)) *
+            token1Price;
         }
 
         const totalUSDValue = token0USDValue + token1USDValue;
@@ -3402,43 +3536,23 @@ export class AerodromeService {
         let feesCollectedToken0USD = 0;
         let feesCollectedToken1USD = 0;
 
-        // Calculate USD value of previous collected fees
+        // Calculate USD value of previous collected fees using already fetched prices
         if (poolConfig.token0 === this.USDC_ADDRESS) {
           feesCollectedToken0USD =
             Number(prevCollected0) / Math.pow(10, this.USDC_DECIMALS);
         } else {
-          try {
-            const token0Price = await this.getTokenPrice(poolConfig.token0Name);
-            feesCollectedToken0USD =
-              (Number(prevCollected0) /
-                Math.pow(10, poolConfig.token0Decimals)) *
-              token0Price;
-          } catch (error) {
-            console.error(
-              `Failed to get price for ${poolConfig.token0Name}:`,
-              error,
-            );
-            feesCollectedToken0USD = 0;
-          }
+          feesCollectedToken0USD =
+            (Number(prevCollected0) / Math.pow(10, poolConfig.token0Decimals)) *
+            token0Price;
         }
 
         if (poolConfig.token1 === this.USDC_ADDRESS) {
           feesCollectedToken1USD =
             Number(prevCollected1) / Math.pow(10, this.USDC_DECIMALS);
         } else {
-          try {
-            const token1Price = await this.getTokenPrice(poolConfig.token1Name);
-            feesCollectedToken1USD =
-              (Number(prevCollected1) /
-                Math.pow(10, poolConfig.token1Decimals)) *
-              token1Price;
-          } catch (error) {
-            console.error(
-              `Failed to get price for ${poolConfig.token1Name}:`,
-              error,
-            );
-            feesCollectedToken1USD = 0;
-          }
+          feesCollectedToken1USD =
+            (Number(prevCollected1) / Math.pow(10, poolConfig.token1Decimals)) *
+            token1Price;
         }
 
         feesCollectedUSD = feesCollectedToken0USD + feesCollectedToken1USD;
@@ -5613,7 +5727,11 @@ export class AerodromeService {
       } else {
         // Get token0 price and calculate USD value
         try {
-          const token0Price = await this.getTokenPrice(poolConfig.token0Name);
+          const token0Price = await this.getTokenPriceForSwap(
+            poolConfig.token0,
+            poolConfig.token0Name,
+            poolConfig.token0Decimals,
+          );
           token0USDValue =
             (Number(actualToken0AmountBigInt) /
               Math.pow(10, poolConfig.token0Decimals)) *
@@ -5635,7 +5753,11 @@ export class AerodromeService {
       } else {
         // Get token1 price and calculate USD value
         try {
-          const token1Price = await this.getTokenPrice(poolConfig.token1Name);
+          const token1Price = await this.getTokenPriceForSwap(
+            poolConfig.token1,
+            poolConfig.token1Name,
+            poolConfig.token1Decimals,
+          );
           token1USDValue =
             (Number(actualToken1AmountBigInt) /
               Math.pow(10, poolConfig.token1Decimals)) *

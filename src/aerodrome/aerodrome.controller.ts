@@ -201,6 +201,20 @@ export class AerodromeController {
   }
 
   @Public()
+  @Get('test/calculate-token-amounts')
+  async testCalculateTokenAmounts(
+    @Query('pool') pool: string,
+    @Query('usdcAmount') usdcAmount: string,
+  ) {
+    const amount = parseFloat(usdcAmount);
+    if (isNaN(amount) || amount <= 0) {
+      throw new Error('Invalid USDC amount');
+    }
+
+    return this.aerodromeService.testCalculateTokenAmounts(pool, amount);
+  }
+
+  @Public()
   @Post('rebalancing/trigger')
   async triggerRebalancing() {
     return this.rebalancingCronService.manualTriggerRebalancing();
