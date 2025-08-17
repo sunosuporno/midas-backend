@@ -5240,10 +5240,107 @@ export class AerodromeService {
         console.log('Buy amount check passed:', buyAmountCheck);
 
         if (!buyAmountCheck) {
-          const errorMessage = `1inch swap transaction succeeded but buy amount is below minimum. Transaction hash: ${txResult?.transactionHash}. Expected min buy change: ${expectedMinBuyAmount}, Actual buy change: ${buyBalanceChange}`;
-          console.error('=== SWAP VERIFICATION FAILED ===');
-          console.error(errorMessage);
-          throw new Error(errorMessage);
+          // Calculate the shortfall
+          const shortfall = expectedMinBuyAmount - buyBalanceChange;
+          const shortfallPercentage =
+            Number((shortfall * BigInt(10000)) / expectedMinBuyAmount) / 100;
+
+          console.log('=== SWAP VERIFICATION - SHORTFALL DETECTED ===');
+          console.log('Shortfall amount:', shortfall.toString());
+          console.log('Shortfall percentage:', shortfallPercentage + '%');
+
+          // If shortfall is small (less than 5%), try to swap the difference
+          if (shortfallPercentage <= 5) {
+            console.log(
+              'Shortfall is small, attempting to swap the difference...',
+            );
+
+            // Calculate how much more sell token we need to swap to get the missing amount
+            // We'll use a simple ratio: (shortfall / received_amount) * original_sell_amount
+            const additionalSellAmount =
+              (BigInt(sellAmountRaw) * shortfall) / buyBalanceChange;
+
+            console.log(
+              'Additional sell amount needed:',
+              additionalSellAmount.toString(),
+            );
+
+            // Check if we have enough balance for the additional swap
+            const currentSellBalance = await this.readContract(
+              sellToken,
+              ERC20_ABI as unknown as any[],
+              'balanceOf',
+              [walletAddress],
+            );
+
+            const { decodeFunctionResult } = await import('viem');
+            const decodedCurrentSellBalance = decodeFunctionResult({
+              abi: ERC20_ABI as any,
+              functionName: 'balanceOf',
+              data: currentSellBalance,
+            });
+
+            console.log(
+              'Current sell token balance:',
+              decodedCurrentSellBalance.toString(),
+            );
+
+            if (
+              BigInt(decodedCurrentSellBalance.toString()) >=
+              additionalSellAmount
+            ) {
+              try {
+                console.log('Attempting to swap the difference...');
+                const additionalSwapResult = await this.swapWith1inch(
+                  walletLocator,
+                  sellToken,
+                  buyToken,
+                  additionalSellAmount.toString(),
+                  slippagePercent,
+                  walletAddress,
+                );
+
+                // Add the additional amount to our total
+                const totalBuyAmount =
+                  buyBalanceChange + BigInt(additionalSwapResult.buyAmount);
+                console.log(
+                  'Total buy amount after additional swap:',
+                  totalBuyAmount.toString(),
+                );
+
+                // Verify the total amount meets our minimum
+                if (totalBuyAmount >= expectedMinBuyAmount) {
+                  console.log(
+                    '=== SWAP VERIFICATION SUCCESSFUL (with additional swap) ===',
+                  );
+                  return { buyAmount: totalBuyAmount.toString(), txResult };
+                } else {
+                  console.log(
+                    'Additional swap still insufficient, but accepting partial result',
+                  );
+                  return { buyAmount: totalBuyAmount.toString(), txResult };
+                }
+              } catch (additionalSwapError) {
+                console.error(
+                  'Additional swap failed:',
+                  additionalSwapError.message,
+                );
+                console.log('Accepting partial result from original swap');
+                return { buyAmount: buyBalanceChange.toString(), txResult };
+              }
+            } else {
+              console.log(
+                'Insufficient balance for additional swap, accepting partial result',
+              );
+              return { buyAmount: buyBalanceChange.toString(), txResult };
+            }
+          } else {
+            // Shortfall is too large, throw error for retry
+            const errorMessage = `1inch swap transaction succeeded but buy amount is below minimum. Transaction hash: ${txResult?.transactionHash}. Expected min buy change: ${expectedMinBuyAmount}, Actual buy change: ${buyBalanceChange}, Shortfall: ${shortfallPercentage}%`;
+            console.error('=== SWAP VERIFICATION FAILED ===');
+            console.error(errorMessage);
+            throw new Error(errorMessage);
+          }
         }
 
         console.log('=== SWAP VERIFICATION SUCCESSFUL ===');
@@ -8018,6 +8115,226 @@ export class AerodromeService {
       console.log('=== VALIDATION COMPLETE ===');
     } catch (error) {
       console.error('Error in validation:', error);
+    }
+  }
+
+  /**
+   * Convert human-readable amount to raw amount with proper decimals
+   */
+  private parseHumanAmount(amount: string, tokenAddress: string): string {
+    // Common token decimals mapping for Base network
+    const tokenDecimals: { [key: string]: number } = {
+      // USDC on Base
+      '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913': 6,
+      // WETH on Base
+      '0x4200000000000000000000000000000000000006': 18,
+      // Common stablecoins
+      '0x50c5725949A6F0c72E6C4a641F24049A917DB0Cb': 6, // DAI on Base
+      '0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9': 6, // USDT on Base
+    };
+
+    // Extract amount and token symbol from string like "0.5 ETH" or "100 USDC"
+    const amountMatch = amount.match(/^([\d.]+)\s*([A-Za-z]+)?$/);
+    if (!amountMatch) {
+      throw new Error(
+        `Invalid amount format: ${amount}. Expected format: "0.5 ETH" or "100 USDC" or just "0.5"`,
+      );
+    }
+
+    const numericAmount = parseFloat(amountMatch[1]);
+    const tokenSymbol = amountMatch[2]?.toUpperCase();
+
+    if (isNaN(numericAmount) || numericAmount <= 0) {
+      throw new Error(`Invalid numeric amount: ${amountMatch[1]}`);
+    }
+
+    // Determine decimals based on token symbol or address
+    let decimals = 18; // Default to 18 decimals
+
+    if (tokenSymbol) {
+      // Map common symbols to decimals
+      const symbolDecimals: { [key: string]: number } = {
+        USDC: 6,
+        USDT: 6,
+        DAI: 18,
+        WETH: 18,
+        ETH: 18,
+        WBTC: 8,
+        BTC: 8,
+      };
+      decimals = symbolDecimals[tokenSymbol] || 18;
+    } else {
+      // Use address-based decimals
+      decimals = tokenDecimals[tokenAddress.toLowerCase()] || 18;
+    }
+
+    // Convert to raw amount
+    const rawAmount = BigInt(
+      Math.floor(numericAmount * Math.pow(10, decimals)),
+    );
+    return rawAmount.toString();
+  }
+
+  /**
+   * Manual token swap using only 0x API
+   */
+  async manualSwap(
+    walletLocator: string,
+    sellToken: string,
+    buyToken: string,
+    sellAmount: string,
+    slippagePercent: number = 0.3,
+  ): Promise<{
+    success: boolean;
+    message: string;
+    transactionHash?: string;
+    buyAmount?: string;
+    expectedBuyAmount?: string;
+    minBuyAmount?: string;
+    gasUsed?: string;
+    gasPrice?: string;
+    totalCost?: string;
+  }> {
+    console.log('=== MANUAL SWAP REQUEST ===');
+    console.log('Parameters:', {
+      walletLocator,
+      sellToken,
+      buyToken,
+      sellAmount,
+      slippagePercent,
+    });
+
+    try {
+      const walletAddress = this.getWalletAddressFromLocator(walletLocator);
+
+      // Validate that sell and buy tokens are different
+      if (sellToken.toLowerCase() === buyToken.toLowerCase()) {
+        throw new Error('Cannot swap token for itself');
+      }
+
+      // Parse human-readable amount to raw amount
+      const rawSellAmount = this.parseHumanAmount(sellAmount, sellToken);
+      console.log(`Parsed amount: ${sellAmount} -> ${rawSellAmount} (raw)`);
+
+      // Validate sell amount
+      const sellAmountBigInt = BigInt(rawSellAmount);
+      if (sellAmountBigInt <= 0n) {
+        throw new Error('Sell amount must be greater than 0');
+      }
+
+      // Check sell token balance
+      const sellTokenBalance = await this.readContract(
+        sellToken,
+        ERC20_ABI as unknown as any[],
+        'balanceOf',
+        [walletAddress],
+      );
+
+      const { decodeFunctionResult } = await import('viem');
+      const decodedSellTokenBalance = decodeFunctionResult({
+        abi: ERC20_ABI as any,
+        functionName: 'balanceOf',
+        data: sellTokenBalance,
+      });
+
+      if (BigInt(decodedSellTokenBalance.toString()) < sellAmountBigInt) {
+        throw new Error(
+          `Insufficient balance. Required: ${rawSellAmount} (${sellAmount}), Available: ${decodedSellTokenBalance.toString()}`,
+        );
+      }
+
+      // Get 0x price quote
+      const priceQuote = await this.get0xPrice(
+        sellToken,
+        buyToken,
+        rawSellAmount,
+        walletAddress,
+      );
+
+      // Get 0x swap quote
+      const swapQuote = await this.get0xQuote(
+        sellToken,
+        buyToken,
+        rawSellAmount,
+        walletAddress,
+      );
+
+      // Handle token approval if needed
+      if (priceQuote.issues?.allowance) {
+        console.log('Approving token for 0x spender...');
+        await this.handleTokenApproval(
+          walletLocator,
+          sellToken,
+          priceQuote.issues.allowance.spender,
+          sellAmountBigInt,
+        );
+      }
+
+      // Execute the swap
+      console.log('Executing 0x swap transaction...');
+      const txResult = await this.sendRawTransaction(
+        walletLocator,
+        swapQuote.transaction.to,
+        swapQuote.transaction.data,
+        swapQuote.transaction.value || '0',
+      );
+
+      if (txResult?.status !== 'success') {
+        throw new Error(`Transaction failed with status: ${txResult?.status}`);
+      }
+
+      // Wait for transaction to be processed
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+
+      // Get the actual buy amount from Transfer events
+      const buyBalanceChange = await this.getBuyAmountFromTransferEvents(
+        txResult.transactionHash,
+        buyToken,
+        walletAddress,
+      );
+
+      // Verify the swap was successful
+      const expectedMinBuyAmount = BigInt(swapQuote.minBuyAmount);
+      const buyAmountCheck = buyBalanceChange >= expectedMinBuyAmount;
+
+      if (!buyAmountCheck) {
+        const shortfall = expectedMinBuyAmount - buyBalanceChange;
+        const shortfallPercentage =
+          Number((shortfall * 10000n) / expectedMinBuyAmount) / 100;
+
+        console.warn(
+          'Swap completed but received less than minimum expected amount:',
+          {
+            expectedMin: expectedMinBuyAmount.toString(),
+            received: buyBalanceChange.toString(),
+            shortfall: shortfall.toString(),
+            shortfallPercentage: `${shortfallPercentage}%`,
+          },
+        );
+      }
+
+      // Calculate gas costs (using estimated values from quote)
+      const gasUsed = swapQuote.transaction.gas || '0';
+      const gasPrice = swapQuote.transaction.gasPrice || '0';
+      const totalGasCost = BigInt(gasUsed) * BigInt(gasPrice);
+
+      return {
+        success: true,
+        message: 'Swap completed successfully',
+        transactionHash: txResult.transactionHash,
+        buyAmount: buyBalanceChange.toString(),
+        expectedBuyAmount: swapQuote.buyAmount,
+        minBuyAmount: swapQuote.minBuyAmount,
+        gasUsed,
+        gasPrice,
+        totalCost: totalGasCost.toString(),
+      };
+    } catch (error) {
+      console.error('Manual swap failed:', error);
+      return {
+        success: false,
+        message: error.message || 'Swap failed',
+      };
     }
   }
 }

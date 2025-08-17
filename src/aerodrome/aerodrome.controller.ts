@@ -10,6 +10,7 @@ import {
 } from '@nestjs/common';
 import { AerodromeService } from './aerodrome.service';
 import { CreateAerodromeLpDto } from './dto/create-aerodrome-lp.dto';
+import { ManualSwapDto } from './dto/manual-swap.dto';
 import { Public } from '../decorators/public.decorator';
 // import { AerodromePositionTrackingCronService } from '../aerodrome-position-tracking-cron.service';
 import { AerodromeRebalancingCronService } from '../aerodrome-rebalancing-cron.service';
@@ -517,6 +518,32 @@ export class AerodromeController {
     return this.aerodromeService.emergencyBurnAllPositions(
       walletAddress,
       tokenId,
+    );
+  }
+
+  /**
+   * Manual token swap using 0x API
+   *
+   * sellAmount can be human-readable:
+   * - "0.5 ETH" or "0.5 WETH" (18 decimals)
+   * - "100 USDC" or "100 USDT" (6 decimals)
+   * - "0.1 BTC" or "0.1 WBTC" (8 decimals)
+   * - "1.5 DAI" (18 decimals)
+   * - Just "0.5" (defaults to 18 decimals)
+   */
+  @Public()
+  @Post('swap/manual')
+  @HttpCode(HttpStatus.OK)
+  async manualSwap(@Body() manualSwapDto: ManualSwapDto) {
+    console.log('=== MANUAL SWAP ENDPOINT CALLED ===');
+    console.log('Request body:', manualSwapDto);
+
+    return this.aerodromeService.manualSwap(
+      manualSwapDto.walletLocator,
+      manualSwapDto.sellToken,
+      manualSwapDto.buyToken,
+      manualSwapDto.sellAmount,
+      manualSwapDto.slippagePercent,
     );
   }
 }
