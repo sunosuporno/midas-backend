@@ -311,28 +311,70 @@ export class AerodromeService {
       throw new HttpException('ZEROX_API_KEY not configured', 500);
     }
 
-    const response = await fetch(url.toString(), {
-      method: 'GET',
-      headers: {
-        '0x-api-key': apiKey,
-        '0x-version': 'v2',
-      },
-    });
+    // Retry mechanism for 0x API calls
+    const maxRetries = 3;
+    let lastError: any;
 
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error('0x API request failed:', {
-        status: response.status,
-        error: errorText,
-      });
-      throw new Error(
-        `Failed to fetch ${url}: ${JSON.stringify(errorText, null, 2)}`,
-      );
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        const response = await fetch(url.toString(), {
+          method: 'GET',
+          headers: {
+            '0x-api-key': apiKey,
+            '0x-version': 'v2',
+          },
+        });
+
+        if (!response.ok) {
+          const errorText = await response.text();
+          console.error(
+            `0x API request failed (attempt ${attempt}/${maxRetries}):`,
+            {
+              status: response.status,
+              error: errorText,
+            },
+          );
+
+          // Only retry for 5xx errors (server errors) and 429 (rate limit)
+          if (
+            (response.status >= 500 && response.status < 600) ||
+            response.status === 429
+          ) {
+            if (attempt < maxRetries) {
+              const waitTime = Math.min(2000 * Math.pow(2, attempt - 1), 10000);
+              console.log(
+                `Retrying 0x API request in ${waitTime}ms (attempt ${attempt}/${maxRetries})`,
+              );
+              await new Promise((resolve) => setTimeout(resolve, waitTime));
+              lastError = new Error(
+                `Failed to fetch ${url}: ${JSON.stringify(errorText, null, 2)}`,
+              );
+              continue;
+            }
+          }
+
+          throw new Error(
+            `Failed to fetch ${url}: ${JSON.stringify(errorText, null, 2)}`,
+          );
+        }
+
+        const data = await response.json();
+        console.log('0x API response:', data);
+        return data;
+      } catch (error) {
+        lastError = error;
+        if (attempt < maxRetries) {
+          const waitTime = Math.min(2000 * Math.pow(2, attempt - 1), 10000);
+          console.log(
+            `Retrying 0x API request in ${waitTime}ms (attempt ${attempt}/${maxRetries}) due to: ${error.message}`,
+          );
+          await new Promise((resolve) => setTimeout(resolve, waitTime));
+        }
+      }
     }
 
-    const data = await response.json();
-    console.log('0x API response:', data);
-    return data;
+    // If we get here, all retries failed
+    throw lastError;
   }
 
   async get0xPriceForEndpoint(
@@ -394,19 +436,44 @@ export class AerodromeService {
       // Use 0x pricing for any non-USDC token
       console.log(`Using 0x pricing for swap calculation (${tokenName})`);
 
-      // Get 1 token in wei (using token decimals)
-      const oneTokenInWei = (10 ** tokenDecimals).toString();
+      try {
+        // Get 1 token in wei (using token decimals)
+        const oneTokenInWei = (10 ** tokenDecimals).toString();
 
-      const oxResponse = await this.get0xPriceForEndpoint(
-        tokenAddress, // Use token address
-        this.USDC_ADDRESS, // Use existing USDC address
-        oneTokenInWei,
-      );
+        const oxResponse = await this.get0xPriceForEndpoint(
+          tokenAddress, // Use token address
+          this.USDC_ADDRESS, // Use existing USDC address
+          oneTokenInWei,
+        );
 
-      const oxBuyAmount = BigInt(oxResponse.buyAmount);
-      const price = Number(oxBuyAmount) / 1e6; // USDC has 6 decimals
-      console.log(`0x price for ${tokenName}: $${price}`);
-      return price;
+        const oxBuyAmount = BigInt(oxResponse.buyAmount);
+        const price = Number(oxBuyAmount) / 1e6; // USDC has 6 decimals
+        console.log(`0x price for ${tokenName}: $${price}`);
+        return price;
+      } catch (error) {
+        console.error(
+          `Failed to get 0x price for ${tokenName}:`,
+          error.message,
+        );
+
+        // Fallback: Use Pyth Network price oracle
+        try {
+          console.log(`Attempting Pyth fallback for ${tokenName}`);
+          const pythPrice = await this.getTokenPrice(tokenName);
+          console.log(`Pyth fallback price for ${tokenName}: $${pythPrice}`);
+          return pythPrice;
+        } catch (pythError) {
+          console.error(
+            `Both 0x and Pyth failed for ${tokenName}:`,
+            pythError.message,
+          );
+
+          // If both 0x and Pyth fail, throw an error to prevent incorrect calculations
+          throw new Error(
+            `Unable to get price for ${tokenName} - both 0x and Pyth price sources failed`,
+          );
+        }
+      }
     }
   }
 
@@ -2417,7 +2484,7 @@ export class AerodromeService {
     try {
       console.log('Getting price for token:', tokenName);
 
-      // Get price feed ID from Pyth
+      // Try Pyth Network first
       const pythResponse = await fetch(
         `https://hermes.pyth.network/v2/price_feeds?query=${tokenName.toLowerCase()}&asset_type=crypto`,
       );
@@ -2436,11 +2503,15 @@ export class AerodromeService {
       // Calculate USD value (convert from raw format to actual USD)
       const price = Number(priceData.parsed[0].price.price) / 1e8;
 
-      console.log(`Price for ${tokenName}: $${price}`);
+      console.log(`Pyth price for ${tokenName}: $${price}`);
       return price;
     } catch (error) {
-      console.error(`Error getting price for ${tokenName}:`, error);
-      throw new Error(`Failed to get price for ${tokenName}: ${error.message}`);
+      console.error(`Pyth failed for ${tokenName}:`, error.message);
+
+      // If Pyth fails, throw an error to prevent incorrect calculations
+      throw new Error(
+        `Unable to get price for ${tokenName} - Pyth price source failed`,
+      );
     }
   }
 
@@ -2514,26 +2585,15 @@ export class AerodromeService {
     let token0Price: number;
     let token1Price: number;
 
+    // Get token prices using getTokenPriceForSwap which has comprehensive fallback logic
     if (poolConfig.token0 === this.USDC_ADDRESS) {
       token0Price = 1.0; // USDC price is always $1.00
       console.log('Token0 is USDC, price: $1.00');
     } else {
-      // Use 0x pricing for any non-USDC token
-      console.log(`Using 0x pricing for token0 (${poolConfig.token0Name})`);
-
-      // Get 1 token0 in wei (using token0 decimals from pool config)
-      const oneToken0InWei = (10 ** poolConfig.token0Decimals).toString();
-
-      const oxResponse = await this.get0xPriceForEndpoint(
-        poolConfig.token0, // Use token0 address from pool config
-        this.USDC_ADDRESS, // Use existing USDC address
-        oneToken0InWei,
-      );
-
-      const oxBuyAmount = BigInt(oxResponse.buyAmount);
-      token0Price = Number(oxBuyAmount) / 1e6; // USDC has 6 decimals
-      console.log(
-        `0x price for token0 (${poolConfig.token0Name}): $${token0Price}`,
+      token0Price = await this.getTokenPriceForSwap(
+        poolConfig.token0,
+        poolConfig.token0Name,
+        poolConfig.token0Decimals,
       );
     }
 
@@ -2541,22 +2601,10 @@ export class AerodromeService {
       token1Price = 1.0; // USDC price is always $1.00
       console.log('Token1 is USDC, price: $1.00');
     } else {
-      // Use 0x pricing for any non-USDC token
-      console.log(`Using 0x pricing for token1 (${poolConfig.token1Name})`);
-
-      // Get 1 token1 in wei (using token1 decimals from pool config)
-      const oneToken1InWei = (10 ** poolConfig.token1Decimals).toString();
-
-      const oxResponse = await this.get0xPriceForEndpoint(
-        poolConfig.token1, // Use token1 address from pool config
-        this.USDC_ADDRESS, // Use existing USDC address
-        oneToken1InWei,
-      );
-
-      const oxBuyAmount = BigInt(oxResponse.buyAmount);
-      token1Price = Number(oxBuyAmount) / 1e6; // USDC has 6 decimals
-      console.log(
-        `0x price for token1 (${poolConfig.token1Name}): $${token1Price}`,
+      token1Price = await this.getTokenPriceForSwap(
+        poolConfig.token1,
+        poolConfig.token1Name,
+        poolConfig.token1Decimals,
       );
     }
 
@@ -4973,7 +5021,7 @@ export class AerodromeService {
     console.log('Sell token balance:', decodedPreSwapSellBalance.toString());
     console.log('Buy token balance:', decodedPreSwapBuyBalance.toString());
 
-    // Get price quote
+    // Get price quote and swap quote
     const priceQuote = await this.get0xPrice(
       sellToken,
       buyToken,
@@ -5168,16 +5216,31 @@ export class AerodromeService {
         );
 
         // Verify that we received at least the expected amount
-        const expectedBuyAmount = BigInt(
+        const quotedAmount = BigInt(
           swapResponse.dstAmount || swapResponse.toTokenAmount || '0',
         );
-        const buyAmountCheck = buyBalanceChange >= expectedBuyAmount;
+
+        // Calculate minimum buy amount by applying slippage tolerance
+        // If slippage is 0.3%, we accept 99.7% of the quoted amount
+        const slippageMultiplier = (100 - slippagePercent) / 100;
+        const expectedMinBuyAmount =
+          (quotedAmount * BigInt(Math.floor(slippageMultiplier * 10000))) /
+          BigInt(10000);
+
+        const buyAmountCheck = buyBalanceChange >= expectedMinBuyAmount;
 
         console.log('Verification results:');
+        console.log('Quoted amount:', quotedAmount.toString());
+        console.log('Slippage tolerance:', slippagePercent + '%');
+        console.log(
+          'Minimum expected amount:',
+          expectedMinBuyAmount.toString(),
+        );
+        console.log('Actual received amount:', buyBalanceChange.toString());
         console.log('Buy amount check passed:', buyAmountCheck);
 
         if (!buyAmountCheck) {
-          const errorMessage = `1inch swap transaction succeeded but buy amount is below expected. Transaction hash: ${txResult?.transactionHash}. Expected buy change: ${expectedBuyAmount}, Actual buy change: ${buyBalanceChange}`;
+          const errorMessage = `1inch swap transaction succeeded but buy amount is below minimum. Transaction hash: ${txResult?.transactionHash}. Expected min buy change: ${expectedMinBuyAmount}, Actual buy change: ${buyBalanceChange}`;
           console.error('=== SWAP VERIFICATION FAILED ===');
           console.error(errorMessage);
           throw new Error(errorMessage);
@@ -5440,7 +5503,10 @@ export class AerodromeService {
         outOfRange: [] as any[],
       };
 
-      console.log('availablePositions', availablePositions);
+      console.log(
+        'availablePositions',
+        availablePositions.map((pos) => pos.positionId),
+      );
 
       // Check for out-of-range positions (only condition)
       const outOfRangePositions =
