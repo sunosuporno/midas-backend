@@ -4723,9 +4723,6 @@ export class AerodromeService {
         collectedFees: position.collectedFees,
       });
 
-      // Get position details before rebalancing
-      await this.getPositionDetails(positionId);
-
       // Step 1: Burn the old position (this will also collect any remaining fees)
       console.log('Step 1: Burning old position...');
       const tokenId = position.metadata?.mintDetails?.tokenId;
@@ -4747,6 +4744,19 @@ export class AerodromeService {
           `Burn operation failed for position ${positionId} - no result returned`,
           500,
         );
+      }
+
+      // Step 2: Get position details to update tracking data (similar to fee collection)
+      console.log('Step 2: Getting position details for tracking...');
+      try {
+        await this.getPositionDetails(positionId);
+        console.log('✅ Position details updated successfully');
+      } catch (error) {
+        console.warn(
+          '⚠️ Failed to get position details during rebalancing:',
+          error.message,
+        );
+        // Don't fail the rebalancing if position details update fails
       }
 
       // Step 3: Use the token amounts from burn result for rebalancing

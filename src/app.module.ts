@@ -10,7 +10,7 @@ import { ApiKey, ApiKeySchema } from './schemas/api-key.schema';
 // import { TwitterModule } from './twitter/twitter.module';
 // import { MentionCronService } from './mention-cron.service';
 import { AerodromeRebalancingCronService } from './aerodrome-rebalancing-cron.service';
-import { AerodromePositionTrackingCronService } from './aerodrome-position-tracking-cron.service';
+// import { AerodromePositionTrackingCronService } from './aerodrome-position-tracking-cron.service';
 // import { AerodromeFeeOptimiserRebalancingCronService } from './aerodrome-fee-optimiser-rebalancing-cron.service';
 // import { AerodromeFeeOptimiserV2RebalancingCronService } from './aerodrome-fee-optimiser-v2-rebalancing-cron.service';
 // import { AerodromeVolumeBlockCronService } from './aerodrome-volume-block-cron.service';
@@ -59,7 +59,7 @@ import {
     CrossmintJwtGuard,
     // MentionCronService,
     AerodromeRebalancingCronService,
-    AerodromePositionTrackingCronService,
+    // AerodromePositionTrackingCronService,
     // AerodromeFeeOptimiserRebalancingCronService,
     // AerodromeFeeOptimiserV2RebalancingCronService,
     // AerodromeVolumeBlockCronService,
