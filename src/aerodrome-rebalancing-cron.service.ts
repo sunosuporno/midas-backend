@@ -30,7 +30,7 @@ import { AerodromeService } from './aerodrome/aerodrome.service';
 export class AerodromeRebalancingCronService implements OnModuleInit {
   private isRunning = false;
   private nextRunTimeout: NodeJS.Timeout | null = null;
-  private readonly REBALANCING_INTERVAL = 10 * 60 * 1000; // 10 minutes in milliseconds
+  private readonly REBALANCING_INTERVAL = 5 * 60 * 1000; // 5 minutes in milliseconds
   private lastRunTime: Date | null = null;
   private lastRunDuration: number | null = null;
   private timeSinceLastRun: number | null = null;

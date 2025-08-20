@@ -483,6 +483,11 @@ export class AerodromeService {
     sellAmount: string,
     walletAddress: string,
   ) {
+    if (buyToken == sellToken) {
+      return {
+        price: 1,
+      };
+    }
     const slippageBps = 30; // Fixed 0.3% slippage
     console.log('Getting 0x price with parameters:', {
       sellToken,
@@ -1487,15 +1492,23 @@ export class AerodromeService {
         [walletAddress],
       );
       const token0Balance = BigInt(token0BalanceRaw);
-      // Determine approve amount for token0 based on actual swap output (if swapped),
-      // otherwise use desired amount, capped by current balance
+      // Determine approve amount for token0 based on mode
       let approveAmount0: bigint;
-      if (token0DidSwap && token0BuyAmount) {
-        const swapped0 = BigInt(token0BuyAmount);
-        approveAmount0 = swapped0 <= token0Balance ? swapped0 : token0Balance;
+      if (createAerodromeLpDto.isRebalanceOrRetry) {
+        // Retry mode: use amount0Used from retry function (includes excess USD)
+        approveAmount0 =
+          amount0Used <= token0Balance ? amount0Used : token0Balance;
       } else {
-        const desired0 = BigInt(liquidityAmounts.usedAmounts.token0.rawAmount);
-        approveAmount0 = desired0 <= token0Balance ? desired0 : token0Balance;
+        // Normal mode: use buyAmount if swapped, otherwise use calculated amount
+        if (token0DidSwap && token0BuyAmount) {
+          const swapped0 = BigInt(token0BuyAmount);
+          approveAmount0 = swapped0 <= token0Balance ? swapped0 : token0Balance;
+        } else {
+          const desired0 = BigInt(
+            liquidityAmounts.usedAmounts.token0.rawAmount,
+          );
+          approveAmount0 = desired0 <= token0Balance ? desired0 : token0Balance;
+        }
       }
       console.log('approveAmount0 (final)', approveAmount0.toString());
 
@@ -1514,13 +1527,23 @@ export class AerodromeService {
         [walletAddress],
       );
       const token1Balance = BigInt(token1BalanceRaw);
+      // Determine approve amount for token1 based on mode
       let approveAmount1: bigint;
-      if (token1DidSwap && token1BuyAmount) {
-        const swapped1 = BigInt(token1BuyAmount);
-        approveAmount1 = swapped1 <= token1Balance ? swapped1 : token1Balance;
+      if (createAerodromeLpDto.isRebalanceOrRetry) {
+        // Retry mode: use amount1Used from retry function (includes excess USD)
+        approveAmount1 =
+          amount1Used <= token1Balance ? amount1Used : token1Balance;
       } else {
-        const desired1 = BigInt(liquidityAmounts.usedAmounts.token1.rawAmount);
-        approveAmount1 = desired1 <= token1Balance ? desired1 : token1Balance;
+        // Normal mode: use buyAmount if swapped, otherwise use calculated amount
+        if (token1DidSwap && token1BuyAmount) {
+          const swapped1 = BigInt(token1BuyAmount);
+          approveAmount1 = swapped1 <= token1Balance ? swapped1 : token1Balance;
+        } else {
+          const desired1 = BigInt(
+            liquidityAmounts.usedAmounts.token1.rawAmount,
+          );
+          approveAmount1 = desired1 <= token1Balance ? desired1 : token1Balance;
+        }
       }
       console.log('approveAmount1 (final)', approveAmount1.toString());
 
@@ -2364,12 +2387,22 @@ export class AerodromeService {
     // Check if USD values match (they should be equal)
     const totalStoredUSD = A_USD + B_USD;
     const totalCalculatedUSD = a_USD + b_USD;
+    const usdDifference = totalStoredUSD - totalCalculatedUSD;
 
     console.log('Total USD comparison:', {
       totalStoredUSD: totalStoredUSD.toFixed(2),
       totalCalculatedUSD: totalCalculatedUSD.toFixed(2),
-      difference: Math.abs(totalStoredUSD - totalCalculatedUSD).toFixed(2),
+      difference: Math.abs(usdDifference).toFixed(2),
     });
+
+    // Note the excess amount and add it to the token with bigger value
+    if (usdDifference > 0.01) {
+      console.log(
+        `Excess USD detected: $${usdDifference.toFixed(
+          2,
+        )}. Will add to token with bigger value.`,
+      );
+    }
 
     // Calculate the difference: $A*price - $a*price = $b*price - $B*price
     const token0Difference = A_USD - a_USD;
@@ -2418,8 +2451,28 @@ export class AerodromeService {
         );
 
         console.log('Buy amount:', buyAmount);
-        amount0Used = BigInt(buyAmount) + B;
+
+        // Add excess to token with bigger value (token0 in this case since A_USD > a_USD)
+        let finalAmount0 = A;
+        const finalAmount1 = BigInt(buyAmount) + B;
+
+        if (usdDifference > 0.01) {
+          const excessToken0 = BigInt(
+            Math.floor(
+              (usdDifference / token0Price) *
+                Math.pow(10, poolConfig.token0Decimals),
+            ),
+          );
+          finalAmount0 = A + excessToken0;
+          console.log(
+            `Added excess of ${excessToken0.toString()} to token0 (bigger value)`,
+          );
+        }
+
+        amount0Used = finalAmount0;
+        amount1Used = finalAmount1;
         console.log('Amount0 used:', amount0Used.toString());
+        console.log('Amount1 used:', amount1Used.toString());
 
         swapResults.token0Swap = {
           transactionHash: txResult.transactionHash,
@@ -2452,7 +2505,27 @@ export class AerodromeService {
         );
 
         console.log('Buy amount:', buyAmount);
-        amount1Used = BigInt(buyAmount) + A;
+
+        // Add excess to token with bigger value (token1 in this case since B_USD > b_USD)
+        const finalAmount0 = BigInt(buyAmount) + A;
+        let finalAmount1 = B;
+
+        if (usdDifference > 0.01) {
+          const excessToken1 = BigInt(
+            Math.floor(
+              (usdDifference / token1Price) *
+                Math.pow(10, poolConfig.token1Decimals),
+            ),
+          );
+          finalAmount1 = B + excessToken1;
+          console.log(
+            `Added excess of ${excessToken1.toString()} to token1 (bigger value)`,
+          );
+        }
+
+        amount0Used = finalAmount0;
+        amount1Used = finalAmount1;
+        console.log('Amount0 used:', amount0Used.toString());
         console.log('Amount1 used:', amount1Used.toString());
 
         swapResults.token1Swap = {
@@ -2462,6 +2535,9 @@ export class AerodromeService {
       }
     } else {
       console.log('No rebalancing needed, amounts are close enough');
+      // Use the calculated optimal amounts
+      amount0Used = a;
+      amount1Used = b;
     }
 
     // // For now, use the calculated amounts (a and b) as the target amounts
@@ -4647,6 +4723,9 @@ export class AerodromeService {
         collectedFees: position.collectedFees,
       });
 
+      // Get position details before rebalancing
+      await this.getPositionDetails(positionId);
+
       // Step 1: Burn the old position (this will also collect any remaining fees)
       console.log('Step 1: Burning old position...');
       const tokenId = position.metadata?.mintDetails?.tokenId;
@@ -6566,9 +6645,59 @@ export class AerodromeService {
       const { amount0, amount1, currentTick } =
         await this.getCurrentTokenAmounts(position);
 
-      // Get current token prices
-      const token0Price = await this.getTokenPrice(poolConfig.token0Name);
-      const token1Price = await this.getTokenPrice(poolConfig.token1Name);
+      // Get current token prices using 0x
+      const dummyWalletAddress = '0xF2de711e43409f64aD848449612Ba4069DE418E5';
+      const usdcAmountInBaseUnits = '1000000'; // 1 USDC in base units (6 decimals)
+
+      let token0Price: number;
+      let token1Price: number;
+
+      try {
+        // Get token0 price via 0x (token0 to USDC)
+        const token0PriceQuote = await this.get0xPrice(
+          poolConfig.token0, // token0 (WETH)
+          this.USDC_ADDRESS, // USDC
+          this.toRawAmount(1, poolConfig.token0Decimals).toString(), // 1 WETH in base units
+          dummyWalletAddress,
+        );
+        // Calculate price from buyAmount and sellAmount
+        // buyAmount is in USDC (6 decimals), sellAmount is in WETH (18 decimals)
+        const buyAmount = parseFloat(token0PriceQuote.buyAmount);
+        const sellAmount = parseFloat(token0PriceQuote.sellAmount);
+        token0Price = (buyAmount * Math.pow(10, 12)) / sellAmount; // Convert to proper price ratio
+
+        // Get token1 price via 0x (USDC to token1)
+        const token1PriceQuote = await this.get0xPrice(
+          poolConfig.token1, // token1 (usually USDC, so price should be 1)
+          this.USDC_ADDRESS,
+          usdcAmountInBaseUnits,
+          dummyWalletAddress,
+        );
+        // For USDC to USDC, the price should be 1
+        // But if we're getting a quote, calculate it properly
+        if (token1PriceQuote.buyAmount && token1PriceQuote.sellAmount) {
+          const buyAmount = parseFloat(token1PriceQuote.buyAmount);
+          const sellAmount = parseFloat(token1PriceQuote.sellAmount);
+          token1Price = buyAmount / sellAmount; // Both are in USDC (6 decimals)
+        } else {
+          token1Price = 1; // USDC price is always 1
+        }
+
+        console.log('Token prices from 0x:', {
+          token0Name: poolConfig.token0Name,
+          token1Name: poolConfig.token1Name,
+          token0Price,
+          token1Price,
+        });
+      } catch (error) {
+        console.error(
+          'Failed to get prices from 0x, falling back to getTokenPrice:',
+          error,
+        );
+        // Fallback to original method
+        token0Price = await this.getTokenPrice(poolConfig.token0Name);
+        token1Price = await this.getTokenPrice(poolConfig.token1Name);
+      }
 
       console.log('Token prices:', {
         token0Name: poolConfig.token0Name,
@@ -6594,6 +6723,29 @@ export class AerodromeService {
       const token0DollarValue = amount0Human * token0Price;
       const token1DollarValue = amount1Human * token1Price;
       const totalCurrentDollarValue = token0DollarValue + token1DollarValue;
+
+      // Calculate current token mix/ratio
+      const tokenMix = {
+        token0Percentage:
+          totalCurrentDollarValue > 0
+            ? (token0DollarValue / totalCurrentDollarValue) * 100
+            : 0,
+        token1Percentage:
+          totalCurrentDollarValue > 0
+            ? (token1DollarValue / totalCurrentDollarValue) * 100
+            : 0,
+        token0ToToken1Ratio: amount1Human > 0 ? amount0Human / amount1Human : 0,
+        token1ToToken0Ratio: amount0Human > 0 ? amount1Human / amount0Human : 0,
+        dollarValueRatio:
+          token1DollarValue > 0 ? token0DollarValue / token1DollarValue : 0,
+      };
+
+      console.log('Token mix calculated:', {
+        token0Percentage: `${tokenMix.token0Percentage.toFixed(2)}%`,
+        token1Percentage: `${tokenMix.token1Percentage.toFixed(2)}%`,
+        token0ToToken1Ratio: tokenMix.token0ToToken1Ratio.toFixed(6),
+        dollarValueRatio: tokenMix.dollarValueRatio.toFixed(4),
+      });
 
       // Check if actualUsdcAmount already exists, if not calculate it
       let actualUsdcAmount = position.actualUsdcAmount;
@@ -6676,6 +6828,41 @@ export class AerodromeService {
         usedMintDetails = true;
       }
 
+      // Calculate original token mix/ratio
+      let originalTokenMix = null;
+      if (originalToken0Value !== null && originalToken1Value !== null) {
+        const originalTotalValue = originalToken0Value + originalToken1Value;
+        originalTokenMix = {
+          token0Percentage:
+            originalTotalValue > 0
+              ? (originalToken0Value / originalTotalValue) * 100
+              : 0,
+          token1Percentage:
+            originalTotalValue > 0
+              ? (originalToken1Value / originalTotalValue) * 100
+              : 0,
+          token0ToToken1Ratio:
+            originalToken1Amount > 0
+              ? originalToken0Amount / originalToken1Amount
+              : 0,
+          token1ToToken0Ratio:
+            originalToken0Amount > 0
+              ? originalToken1Amount / originalToken0Amount
+              : 0,
+          dollarValueRatio:
+            originalToken1Value > 0
+              ? originalToken0Value / originalToken1Value
+              : 0,
+        };
+
+        console.log('Original token mix calculated:', {
+          token0Percentage: `${originalTokenMix.token0Percentage.toFixed(2)}%`,
+          token1Percentage: `${originalTokenMix.token1Percentage.toFixed(2)}%`,
+          token0ToToken1Ratio: originalTokenMix.token0ToToken1Ratio.toFixed(6),
+          dollarValueRatio: originalTokenMix.dollarValueRatio.toFixed(4),
+        });
+      }
+
       // Calculate percentage change
       const percentageChange =
         originalUsdcAmount > 0
@@ -6739,6 +6926,10 @@ export class AerodromeService {
           percentageChange,
           absoluteChange: totalCurrentDollarValue - originalUsdcAmount,
           isProfitable: totalCurrentDollarValue > originalUsdcAmount,
+        },
+        tokenMix: {
+          current: tokenMix,
+          original: originalTokenMix,
         },
         metadata: {
           createdAt: (position as any).createdAt,

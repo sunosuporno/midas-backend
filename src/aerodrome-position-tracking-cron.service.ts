@@ -20,7 +20,7 @@ export class AerodromePositionTrackingCronService implements OnModuleInit {
 
   async onModuleInit() {
     // Schedule position tracking cron to run every 40 minutes
-    cron.schedule('*/40 * * * *', async () => {
+    cron.schedule('*/20 * * * *', async () => {
       try {
         console.log('=== AERODROME POSITION TRACKING CRON STARTED ===');
         console.log('Current time:', new Date().toISOString());
