@@ -160,7 +160,22 @@ export class AerodromeFeeOptimiserRebalancingCronService
           const collectedFees = collectResult?.collectedFees?.totalFeesUSD || 0;
           console.log(`Cumulative fees collected: $${collectedFees}`);
 
-          // Step 2: Check current tick position
+          // Step 2: Get position details to update tracking data
+          console.log(`Getting position details for ${position.positionId}...`);
+          try {
+            await this.aerodromeService.getPositionDetails(position.positionId);
+            console.log(
+              `✅ Position details updated for ${position.positionId}`,
+            );
+          } catch (error) {
+            console.warn(
+              `⚠️ Failed to get position details for ${position.positionId}:`,
+              error.message,
+            );
+            // Don't fail the cron if position details update fails
+          }
+
+          // Step 3: Check current tick position
           const shouldRebalance =
             await this.checkFeeOptimiserRebalanceCondition(
               position,

@@ -2453,7 +2453,7 @@ export class AerodromeService {
         console.log('Buy amount:', buyAmount);
 
         // Add excess to token with bigger value (token0 in this case since A_USD > a_USD)
-        let finalAmount0 = A;
+        let finalAmount0 = A - BigInt(sellAmountToken0);
         const finalAmount1 = BigInt(buyAmount) + B;
 
         if (usdDifference > 0.01) {
@@ -2463,7 +2463,7 @@ export class AerodromeService {
                 Math.pow(10, poolConfig.token0Decimals),
             ),
           );
-          finalAmount0 = A + excessToken0;
+          finalAmount0 = finalAmount0 + excessToken0;
           console.log(
             `Added excess of ${excessToken0.toString()} to token0 (bigger value)`,
           );
@@ -2508,7 +2508,7 @@ export class AerodromeService {
 
         // Add excess to token with bigger value (token1 in this case since B_USD > b_USD)
         const finalAmount0 = BigInt(buyAmount) + A;
-        let finalAmount1 = B;
+        let finalAmount1 = B - BigInt(sellAmountToken1);
 
         if (usdDifference > 0.01) {
           const excessToken1 = BigInt(
@@ -2517,7 +2517,7 @@ export class AerodromeService {
                 Math.pow(10, poolConfig.token1Decimals),
             ),
           );
-          finalAmount1 = B + excessToken1;
+          finalAmount1 = finalAmount1 + excessToken1;
           console.log(
             `Added excess of ${excessToken1.toString()} to token1 (bigger value)`,
           );
@@ -4746,20 +4746,7 @@ export class AerodromeService {
         );
       }
 
-      // Step 2: Get position details to update tracking data (similar to fee collection)
-      console.log('Step 2: Getting position details for tracking...');
-      try {
-        await this.getPositionDetails(positionId);
-        console.log('✅ Position details updated successfully');
-      } catch (error) {
-        console.warn(
-          '⚠️ Failed to get position details during rebalancing:',
-          error.message,
-        );
-        // Don't fail the rebalancing if position details update fails
-      }
-
-      // Step 3: Use the token amounts from burn result for rebalancing
+      // Step 2: Use the token amounts from burn result for rebalancing
       const originalUsdcAmount = position.usdcAmount;
       const totalTokensReceived = burnResult.totalTokensReceived;
 
@@ -6505,6 +6492,21 @@ export class AerodromeService {
             console.log(
               `ℹ️ No fees to collect from position ${position.positionId}`,
             );
+          }
+
+          // Get position details to update tracking data
+          console.log(`Getting position details for ${position.positionId}...`);
+          try {
+            await this.getPositionDetails(position.positionId);
+            console.log(
+              `✅ Position details updated for ${position.positionId}`,
+            );
+          } catch (error) {
+            console.warn(
+              `⚠️ Failed to get position details for ${position.positionId}:`,
+              error.message,
+            );
+            // Don't fail the cron if position details update fails
           }
         } catch (error) {
           console.error(
