@@ -6982,6 +6982,8 @@ export class AerodromeService {
           absoluteChange: result.performance.absoluteChange,
           percentageChange: result.performance.percentageChange,
         },
+        tokenMix: result.tokenMix,
+        currentTick: currentTick,
       };
 
       // Update the position with the new details in a single operation
