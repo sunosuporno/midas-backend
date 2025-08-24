@@ -1819,18 +1819,19 @@ export class AerodromeService {
         actualAmount0Valid: actualAmount0 && actualAmount0 !== '0',
         actualAmount1Valid: actualAmount1 && actualAmount1 !== '0',
         tokenIdValid: !!tokenId,
+        // Allow single-token positions - at least one token must be used
+        atLeastOneTokenUsed:
+          (actualAmount0 && actualAmount0 !== '0') ||
+          (actualAmount1 && actualAmount1 !== '0'),
       };
 
       console.log('Validation check results:', validationChecks);
 
-      if (
-        !actualAmount0 ||
-        actualAmount0 === '0' ||
-        !actualAmount1 ||
-        actualAmount1 === '0' ||
-        !tokenId
-      ) {
-        console.log('❌ Mint validation failed - missing required data');
+      // Updated validation: require tokenId and at least one token to be used
+      if (!tokenId || !validationChecks.atLeastOneTokenUsed) {
+        console.log(
+          '❌ Mint validation failed - missing tokenId or no tokens used',
+        );
         console.log('Mint validation details:', {
           actualAmount0,
           actualAmount1,
@@ -1857,12 +1858,14 @@ export class AerodromeService {
         );
 
         throw new HttpException(
-          `Mint failed - missing tokenId or zero amounts. Cleanup and retry initiated.`,
+          `Mint failed - missing tokenId or no tokens used. Cleanup and retry initiated.`,
           400,
         );
       }
 
-      console.log('✅ Mint validation passed - position has non-zero amounts');
+      console.log(
+        '✅ Mint validation passed - position has valid tokenId and at least one token used',
+      );
       console.log('✅ Validation summary:', {
         tokenId,
         actualAmount0,
