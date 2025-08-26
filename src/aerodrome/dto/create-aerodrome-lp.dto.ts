@@ -59,4 +59,8 @@ export class CreateAerodromeLpDto {
   @IsOptional()
   @IsNumber()
   customTickUpper?: number; // Optional custom tick upper for optimal rebalancing
+
+  @IsOptional()
+  @IsNumber()
+  assumedCurrentTick?: number; // Optional assumed current tick for rebalancing (overrides on-chain slot0)
 }

@@ -1265,6 +1265,7 @@ export class AerodromeService {
         percentDeviation,
         createAerodromeLpDto.customTickLower,
         createAerodromeLpDto.customTickUpper,
+        createAerodromeLpDto.assumedCurrentTick,
       );
 
       console.log('Calculated tick range for LP:', tickRange);
@@ -1283,6 +1284,9 @@ export class AerodromeService {
           poolConfig.address,
           poolConfig.tickSpacing,
           rebalanceRange,
+          createAerodromeLpDto.customTickLower,
+          createAerodromeLpDto.customTickUpper,
+          createAerodromeLpDto.assumedCurrentTick,
         );
 
         console.log('Fee-optimiser additional data:', {
@@ -2736,33 +2740,56 @@ export class AerodromeService {
     percentDeviation: number,
     customTickLower?: number,
     customTickUpper?: number,
+    assumedCurrentTick?: number,
   ): Promise<TickRange> {
     console.log('=== Calculating Tick Range ===');
     console.log('Pool Address:', poolAddress);
     console.log('Tick Spacing:', tickSpacing);
     console.log('Percent Deviation:', percentDeviation);
     console.log('Custom Ticks:', { customTickLower, customTickUpper });
+    console.log('Assumed Current Tick:', assumedCurrentTick);
 
     // Constants for tick math
     const LOG_BASE = Math.log(1.0001);
 
     try {
-      // Fetch slot0 from the pool
-      const slot0Result = await this.readContract(
-        poolAddress,
-        poolAbi as unknown as any[],
-        'slot0',
-        [],
-      );
+      let sqrtPriceX96: bigint;
+      let tickCurrent: number;
 
-      console.log('Raw slot0 result:', slot0Result);
+      // Use assumed current tick if provided, otherwise fetch from pool
+      if (assumedCurrentTick !== undefined) {
+        console.log('Using assumed current tick:', assumedCurrentTick);
+        tickCurrent = assumedCurrentTick;
 
-      // Decode the slot0 result
-      // slot0 returns: [sqrtPriceX96, tick, observationIndex, observationCardinality, observationCardinalityNext, unlocked]
-      const decodedResult = this.decodeSlot0Result(slot0Result);
+        // Calculate sqrtPriceX96 from the assumed tick
+        const assumedPrice = Math.exp(assumedCurrentTick * LOG_BASE);
+        const sqrtPrice = Math.sqrt(assumedPrice);
+        sqrtPriceX96 = BigInt(Math.floor(sqrtPrice * 2 ** 96));
 
-      const sqrtPriceX96 = decodedResult.sqrtPriceX96;
-      const tickCurrent = decodedResult.tick;
+        console.log('Calculated from assumed tick:', {
+          assumedTick: assumedCurrentTick,
+          assumedPrice,
+          sqrtPrice,
+          sqrtPriceX96: sqrtPriceX96.toString(),
+        });
+      } else {
+        // Fetch slot0 from the pool
+        const slot0Result = await this.readContract(
+          poolAddress,
+          poolAbi as unknown as any[],
+          'slot0',
+          [],
+        );
+
+        console.log('Raw slot0 result:', slot0Result);
+
+        // Decode the slot0 result
+        // slot0 returns: [sqrtPriceX96, tick, observationIndex, observationCardinality, observationCardinalityNext, unlocked]
+        const decodedResult = this.decodeSlot0Result(slot0Result);
+
+        sqrtPriceX96 = decodedResult.sqrtPriceX96;
+        tickCurrent = decodedResult.tick;
+      }
 
       console.log('Decoded slot0:', {
         sqrtPriceX96: sqrtPriceX96.toString(),
@@ -4658,7 +4685,7 @@ export class AerodromeService {
    */
   async rebalancePosition(
     positionId: string,
-    reason: 'out_of_range' | 'fee_optimiser',
+    reason: 'out_of_range' | 'fee_optimiser' | 'performance_loss',
     strategyName?: string,
   ) {
     return this.rebalancePositionInternal(positionId, reason, strategyName);
@@ -4669,7 +4696,7 @@ export class AerodromeService {
    */
   private async rebalancePositionInternal(
     positionId: string,
-    reason: 'out_of_range' | 'fee_optimiser',
+    reason: 'out_of_range' | 'fee_optimiser' | 'performance_loss',
     strategyName?: string,
   ) {
     try {
@@ -4846,6 +4873,37 @@ export class AerodromeService {
       // Get rebalanceRange from original position for fee-optimiser strategy (not needed for v2)
       const originalRebalanceRange = position.metadata?.rebalanceRange || 3.0;
 
+      // Get the last positionHistory tick and snap it to nearest tickSpacing for performance loss rebalancing
+      let assumedCurrentTick: number | undefined;
+      if (reason === 'performance_loss') {
+        const positionHistory = position.metadata?.positionHistory;
+        if (positionHistory && positionHistory.length > 0) {
+          const lastHistoryEntry = positionHistory[positionHistory.length - 1];
+          const lastTick = lastHistoryEntry?.currentTick;
+
+          if (lastTick !== undefined && lastTick !== null) {
+            // Get pool config to get tickSpacing
+            const poolConfig = getPoolConfig(position.pool);
+            if (poolConfig) {
+              // Snap to lower multiple of tickSpacing (always round down)
+              assumedCurrentTick =
+                Math.floor(lastTick / poolConfig.tickSpacing) *
+                poolConfig.tickSpacing;
+
+              console.log(
+                'Using snapped tick for performance loss rebalancing:',
+                {
+                  originalTick: lastTick,
+                  tickSpacing: poolConfig.tickSpacing,
+                  snappedTick: assumedCurrentTick,
+                  timestamp: lastHistoryEntry.timestamp,
+                },
+              );
+            }
+          }
+        }
+      }
+
       const newPositionDto = {
         walletLocator: position.walletLocator,
         pool: position.pool,
@@ -4863,6 +4921,10 @@ export class AerodromeService {
         ...(useOptimalRange && {
           customTickLower: optimalTickLower,
           customTickUpper: optimalTickUpper,
+        }),
+        // Add assumed current tick for rebalancing
+        ...(assumedCurrentTick !== undefined && {
+          assumedCurrentTick,
         }),
       };
 
@@ -5631,10 +5693,11 @@ export class AerodromeService {
    */
   async getPositionsNeedingRebalancing(): Promise<{
     outOfRange: any[];
+    performanceLoss: any[];
   }> {
     try {
       console.log(
-        '=== Getting Positions Needing Rebalancing (Out-of-Range Only) ===',
+        '=== Getting Positions Needing Rebalancing (Out-of-Range + Performance Loss) ===',
       );
 
       // Get active positions for current pool
@@ -5644,6 +5707,7 @@ export class AerodromeService {
         console.log('No active positions found for current pool');
         return {
           outOfRange: [],
+          performanceLoss: [],
         };
       }
 
@@ -5677,6 +5741,7 @@ export class AerodromeService {
 
       const results = {
         outOfRange: [] as any[],
+        performanceLoss: [] as any[],
       };
 
       console.log(
@@ -5684,13 +5749,19 @@ export class AerodromeService {
         availablePositions.map((pos) => pos.positionId),
       );
 
-      // Check for out-of-range positions (only condition)
+      // Check for out-of-range positions (highest priority)
       const outOfRangePositions =
         await this.getOutOfRangePositions(availablePositions);
       results.outOfRange = outOfRangePositions;
 
+      // Check for performance loss positions (1% deviation + -0.56% loss)
+      const performanceLossPositions =
+        await this.getPerformanceLossPositions(availablePositions);
+      results.performanceLoss = performanceLossPositions;
+
       console.log('Rebalancing analysis results:', {
         outOfRange: results.outOfRange.length,
+        performanceLoss: results.performanceLoss.length,
       });
 
       return results;
@@ -5810,6 +5881,96 @@ export class AerodromeService {
       return outOfRangePositions;
     } catch (error) {
       console.error('Error checking for out-of-range positions:', error);
+      return []; // Return empty array on error to avoid breaking the entire process
+    }
+  }
+
+  /**
+   * Check which positions need rebalancing due to performance loss
+   * Condition: tickRange.percentDeviation === 1 AND last positionHistory.performance.percentageChange < -0.56
+   */
+  private async getPerformanceLossPositions(
+    activePositions: any[],
+  ): Promise<any[]> {
+    try {
+      console.log('=== Checking for Performance Loss Positions ===');
+
+      if (activePositions.length === 0) {
+        console.log('No active positions to check for performance loss');
+        return [];
+      }
+
+      const performanceLossPositions: any[] = [];
+
+      for (const position of activePositions) {
+        try {
+          // Check if position has 1% deviation
+          const percentDeviation =
+            position.metadata?.tickRange?.percentDeviation;
+          if (percentDeviation !== 1) {
+            continue; // Skip positions that don't have 1% deviation
+          }
+
+          // Check if position has position history
+          const positionHistory = position.metadata?.positionHistory;
+          if (!positionHistory || positionHistory.length === 0) {
+            console.log(
+              `Position ${position.positionId} has no position history, skipping performance loss check`,
+            );
+            continue;
+          }
+
+          // Get the most recent position history entry
+          const lastHistoryEntry = positionHistory[positionHistory.length - 1];
+          const percentageChange =
+            lastHistoryEntry?.performance?.percentageChange;
+
+          if (percentageChange === undefined || percentageChange === null) {
+            console.log(
+              `Position ${position.positionId} has no percentage change in last history entry, skipping`,
+            );
+            continue;
+          }
+
+          // Check if percentage change is less than -0.56
+          if (percentageChange < -0.56) {
+            console.log(
+              `Position ${position.positionId} meets performance loss condition:`,
+              {
+                percentDeviation,
+                percentageChange,
+                threshold: -0.56,
+                timestamp: lastHistoryEntry.timestamp,
+              },
+            );
+
+            performanceLossPositions.push(position);
+          } else {
+            console.log(
+              `Position ${position.positionId} does not meet performance loss condition:`,
+              {
+                percentDeviation,
+                percentageChange,
+                threshold: -0.5,
+                timestamp: lastHistoryEntry.timestamp,
+              },
+            );
+          }
+        } catch (positionError) {
+          console.error(
+            `Error checking performance loss for position ${position.positionId}:`,
+            positionError,
+          );
+          // Continue with other positions
+        }
+      }
+
+      console.log(
+        `Found ${performanceLossPositions.length} performance loss positions`,
+      );
+      return performanceLossPositions;
+    } catch (error) {
+      console.error('Error checking for performance loss positions:', error);
       return []; // Return empty array on error to avoid breaking the entire process
     }
   }
@@ -6443,6 +6604,13 @@ export class AerodromeService {
         failed: number;
         skipped: number;
       };
+      performanceLoss: {
+        found: number;
+        processed: number;
+        successful: number;
+        failed: number;
+        skipped: number;
+      };
     };
   }> {
     try {
@@ -6551,9 +6719,16 @@ export class AerodromeService {
           failed: 0,
           skipped: 0,
         },
+        performanceLoss: {
+          found: 0,
+          processed: 0,
+          successful: 0,
+          failed: 0,
+          skipped: 0,
+        },
       };
 
-      // Process out-of-range positions (only condition)
+      // Process out-of-range positions (highest priority)
       results.outOfRange.found = positionsNeedingRebalancing.outOfRange.length;
       console.log(`Found ${results.outOfRange.found} out-of-range positions`);
 
@@ -6590,6 +6765,53 @@ export class AerodromeService {
         }
       }
 
+      // Process performance loss positions (excluding those already in out-of-range)
+      const outOfRangePositionIds = positionsNeedingRebalancing.outOfRange.map(
+        (p) => p.positionId,
+      );
+      const uniquePerformanceLossPositions =
+        positionsNeedingRebalancing.performanceLoss.filter(
+          (position) => !outOfRangePositionIds.includes(position.positionId),
+        );
+
+      results.performanceLoss.found = uniquePerformanceLossPositions.length;
+      console.log(
+        `Found ${results.performanceLoss.found} performance loss positions (after excluding ${positionsNeedingRebalancing.performanceLoss.length - uniquePerformanceLossPositions.length} already in out-of-range)`,
+      );
+
+      for (const position of uniquePerformanceLossPositions) {
+        try {
+          console.log(
+            `Processing performance loss position: ${position.positionId}`,
+          );
+          results.performanceLoss.processed++;
+
+          const rebalanceResult = await this.rebalancePosition(
+            position.positionId,
+            'performance_loss',
+            position.metadata?.strategyName,
+          );
+
+          if (rebalanceResult.success) {
+            results.performanceLoss.successful++;
+            console.log(
+              `✅ Successfully added position ${position.positionId} to rebalancing queue`,
+            );
+          } else {
+            results.performanceLoss.failed++;
+            console.log(
+              `❌ Failed to add position ${position.positionId} to queue: ${rebalanceResult.message}`,
+            );
+          }
+        } catch (error) {
+          results.performanceLoss.failed++;
+          console.error(
+            `❌ Error processing performance loss position ${position.positionId}:`,
+            error,
+          );
+        }
+      }
+
       const endTime = Date.now();
       const duration = endTime - startTime;
 
@@ -6618,6 +6840,13 @@ export class AerodromeService {
             totalPositions: 0,
           },
           outOfRange: {
+            found: 0,
+            processed: 0,
+            successful: 0,
+            failed: 0,
+            skipped: 0,
+          },
+          performanceLoss: {
             found: 0,
             processed: 0,
             successful: 0,
