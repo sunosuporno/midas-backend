@@ -5831,11 +5831,11 @@ export class AerodromeService {
 
           // Check if position is less than 30 minutes old
           const positionCreatedAt = new Date(position.createdAt);
-          const thirtyMinutesAgo = new Date(Date.now() - 30 * 60 * 1000);
+          const fifteenMinutesAgo = new Date(Date.now() - 15 * 60 * 1000);
 
-          if (positionCreatedAt > thirtyMinutesAgo) {
+          if (positionCreatedAt > fifteenMinutesAgo) {
             console.log(
-              `Position ${position.positionId} is less than 30 minutes old (created at ${positionCreatedAt.toISOString()}), skipping rebalancing`,
+              `Position ${position.positionId} is less than 15 minutes old (created at ${positionCreatedAt.toISOString()}), skipping rebalancing`,
             );
             return false;
           }
@@ -5932,19 +5932,123 @@ export class AerodromeService {
             continue;
           }
 
-          // Check if percentage change is less than -0.56
-          if (percentageChange < -0.56) {
+          // NEW TOP CONDITION: Check for significant unused amounts
+          const mintDetails = position.metadata?.mintDetails;
+          if (mintDetails?.amount0Unused && position.usdcAmount) {
+            const amount0UnusedValue =
+              parseFloat(mintDetails.amount0Unused) / 1e18; // Convert from wei to ETH
+            const usdcAmountValue = parseFloat(position.usdcAmount); // Already in human readable format
+
+            // Get current ETH price from the position's token0PriceAtMint or calculate it
+            const currentEthPrice = mintDetails.token0PriceAtMint || 0;
+            const amount0UnusedValueUSD = amount0UnusedValue * currentEthPrice;
+
+            // Calculate the percentage of unused amount relative to USDC amount
+            const unusedPercentage =
+              (amount0UnusedValueUSD / usdcAmountValue) * 100;
+
+            if (unusedPercentage > 20 && percentageChange < -0.32) {
+              console.log(
+                `Position ${position.positionId} meets unused amount condition:`,
+                {
+                  percentDeviation,
+                  percentageChange,
+                  threshold: -0.32,
+                  amount0UnusedValue,
+                  currentEthPrice,
+                  amount0UnusedValueUSD,
+                  usdcAmountValue,
+                  unusedPercentage: `${unusedPercentage.toFixed(2)}%`,
+                  timestamp: lastHistoryEntry.timestamp,
+                },
+              );
+
+              performanceLossPositions.push(position);
+              continue; // Skip other conditions since this is the top priority
+            }
+          }
+
+          // Check if percentage change is less than -0.5
+          if (percentageChange < -0.5) {
             console.log(
               `Position ${position.positionId} meets performance loss condition:`,
               {
                 percentDeviation,
                 percentageChange,
-                threshold: -0.56,
+                threshold: -0.5,
                 timestamp: lastHistoryEntry.timestamp,
               },
             );
 
             performanceLossPositions.push(position);
+          } else if (percentageChange < -0.41) {
+            // Check for trending downward pattern over last 4 iterations
+            if (positionHistory.length >= 4) {
+              const last4Entries = positionHistory.slice(-4);
+              let isDecreasing = true;
+
+              for (let i = 1; i < last4Entries.length; i++) {
+                const currentChange =
+                  last4Entries[i]?.performance?.percentageChange;
+                const previousChange =
+                  last4Entries[i - 1]?.performance?.percentageChange;
+
+                if (
+                  currentChange === undefined ||
+                  previousChange === undefined
+                ) {
+                  isDecreasing = false;
+                  break;
+                }
+
+                // Check if performance is getting worse (more negative)
+                if (currentChange >= previousChange) {
+                  isDecreasing = false;
+                  break;
+                }
+              }
+
+              if (isDecreasing) {
+                console.log(
+                  `Position ${position.positionId} meets trending downward condition:`,
+                  {
+                    percentDeviation,
+                    percentageChange,
+                    threshold: -0.41,
+                    last4Changes: last4Entries.map(
+                      (entry) => entry?.performance?.percentageChange,
+                    ),
+                    timestamp: lastHistoryEntry.timestamp,
+                  },
+                );
+
+                performanceLossPositions.push(position);
+              } else {
+                console.log(
+                  `Position ${position.positionId} does not meet trending downward condition:`,
+                  {
+                    percentDeviation,
+                    percentageChange,
+                    threshold: -0.41,
+                    last4Changes: last4Entries.map(
+                      (entry) => entry?.performance?.percentageChange,
+                    ),
+                    timestamp: lastHistoryEntry.timestamp,
+                  },
+                );
+              }
+            } else {
+              console.log(
+                `Position ${position.positionId} has insufficient history for trending analysis:`,
+                {
+                  percentDeviation,
+                  percentageChange,
+                  historyLength: positionHistory.length,
+                  requiredLength: 4,
+                  timestamp: lastHistoryEntry.timestamp,
+                },
+              );
+            }
           } else {
             console.log(
               `Position ${position.positionId} does not meet performance loss condition:`,
