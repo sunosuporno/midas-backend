@@ -4901,8 +4901,11 @@ export class AerodromeService {
       // Get rebalanceRange from original position for fee-optimiser strategy (not needed for v2)
       const originalRebalanceRange = position.metadata?.rebalanceRange || 3.0;
 
-      // Get the last positionHistory tick and snap it to nearest tickSpacing for performance loss rebalancing
+      // Get the last positionHistory tick and calculate tick range for performance loss rebalancing
       let assumedCurrentTick: number | undefined;
+      let customTickLower: number | undefined;
+      let customTickUpper: number | undefined;
+
       if (reason === 'performance_loss') {
         const positionHistory = position.metadata?.positionHistory;
         if (positionHistory && positionHistory.length > 0) {
@@ -4914,19 +4917,42 @@ export class AerodromeService {
             const poolConfig = getPoolConfig(position.pool);
             if (poolConfig) {
               // Snap to lower multiple of tickSpacing (always round down)
-              assumedCurrentTick =
+              const snappedTick =
                 Math.floor(lastTick / poolConfig.tickSpacing) *
                 poolConfig.tickSpacing;
 
-              console.log(
-                'Using snapped tick for performance loss rebalancing:',
-                {
-                  originalTick: lastTick,
-                  tickSpacing: poolConfig.tickSpacing,
-                  snappedTick: assumedCurrentTick,
-                  timestamp: lastHistoryEntry.timestamp,
-                },
-              );
+              if (originalPercentDeviation === 0.5) {
+                // For 0.5% positions: Shift range DOWN by one full range width to avoid current tick
+                const rangeWidth = 100; // 0.5% deviation = 100 ticks
+                customTickLower = snappedTick - rangeWidth; // -19800 - 100 = -19900
+                customTickUpper = snappedTick; // -19800
+
+                console.log(
+                  'Using shifted tick range for 0.5% performance loss rebalancing:',
+                  {
+                    originalTick: lastTick,
+                    tickSpacing: poolConfig.tickSpacing,
+                    snappedTick,
+                    customTickLower,
+                    customTickUpper,
+                    rangeWidth,
+                    timestamp: lastHistoryEntry.timestamp,
+                  },
+                );
+              } else {
+                // For 1% positions: Use snapped tick as assumed current tick
+                assumedCurrentTick = snappedTick;
+
+                console.log(
+                  'Using snapped tick for 1% performance loss rebalancing:',
+                  {
+                    originalTick: lastTick,
+                    tickSpacing: poolConfig.tickSpacing,
+                    snappedTick: assumedCurrentTick,
+                    timestamp: lastHistoryEntry.timestamp,
+                  },
+                );
+              }
             }
           }
         }
@@ -4950,6 +4976,12 @@ export class AerodromeService {
           customTickLower: optimalTickLower,
           customTickUpper: optimalTickUpper,
         }),
+        // Add custom tick range for 0.5% performance loss rebalancing
+        ...(customTickLower !== undefined &&
+          customTickUpper !== undefined && {
+            customTickLower,
+            customTickUpper,
+          }),
         // Add assumed current tick for rebalancing
         ...(assumedCurrentTick !== undefined && {
           assumedCurrentTick,
@@ -5948,7 +5980,7 @@ export class AerodromeService {
 
   /**
    * Check which positions need rebalancing due to performance loss
-   * Condition: tickRange.percentDeviation === 1 AND last positionHistory.performance.percentageChange < -0.56
+   * Condition: tickRange.percentDeviation === 1 OR 0.5% with different thresholds
    */
   private async getPerformanceLossPositions(
     activePositions: any[],
@@ -5965,11 +5997,11 @@ export class AerodromeService {
 
       for (const position of activePositions) {
         try {
-          // Check if position has 1% deviation
+          // Check if position has 1% or 0.5% deviation (only these support performance loss rebalancing)
           const percentDeviation =
             position.metadata?.tickRange?.percentDeviation;
-          if (percentDeviation !== 1) {
-            continue; // Skip positions that don't have 1% deviation
+          if (percentDeviation !== 1 && percentDeviation !== 0.5) {
+            continue; // Skip positions that don't have 1% or 0.5% deviation
           }
 
           // Check if position has position history
@@ -6008,13 +6040,22 @@ export class AerodromeService {
             const unusedPercentage =
               (amount0UnusedValueUSD / usdcAmountValue) * 100;
 
-            if (unusedPercentage > 20 && percentageChange < -0.32) {
+            // Different thresholds for 0.5% vs 1% deviation
+            const unusedThreshold = percentDeviation === 0.5 ? -0.25 : -0.32;
+            const unusedPercentageThreshold =
+              percentDeviation === 0.5 ? 15 : 20;
+
+            if (
+              unusedPercentage > unusedPercentageThreshold &&
+              percentageChange < unusedThreshold
+            ) {
               console.log(
                 `Position ${position.positionId} meets unused amount condition:`,
                 {
                   percentDeviation,
                   percentageChange,
-                  threshold: -0.32,
+                  threshold: unusedThreshold,
+                  unusedPercentageThreshold,
                   amount0UnusedValue,
                   currentEthPrice,
                   amount0UnusedValueUSD,
@@ -6029,30 +6070,37 @@ export class AerodromeService {
             }
           }
 
-          // Check if percentage change is less than -0.5
-          if (percentageChange < -0.5) {
+          // Different thresholds for 0.5% vs 1% deviation
+          const standardThreshold = percentDeviation === 0.5 ? -0.33 : -0.5;
+          const trendingThreshold = percentDeviation === 0.5 ? -0.28 : -0.41;
+          const historyLengthRequired = percentDeviation === 0.5 ? 3 : 4;
+
+          // Check if percentage change is less than threshold
+          if (percentageChange < standardThreshold) {
             console.log(
               `Position ${position.positionId} meets performance loss condition:`,
               {
                 percentDeviation,
                 percentageChange,
-                threshold: -0.5,
+                threshold: standardThreshold,
                 timestamp: lastHistoryEntry.timestamp,
               },
             );
 
             performanceLossPositions.push(position);
-          } else if (percentageChange < -0.41) {
-            // Check for trending downward pattern over last 4 iterations
-            if (positionHistory.length >= 4) {
-              const last4Entries = positionHistory.slice(-4);
+          } else if (percentageChange < trendingThreshold) {
+            // Check for trending downward pattern over last N iterations (3 for 0.5%, 4 for 1%)
+            if (positionHistory.length >= historyLengthRequired) {
+              const lastNEntries = positionHistory.slice(
+                -historyLengthRequired,
+              );
               let isDecreasing = true;
 
-              for (let i = 1; i < last4Entries.length; i++) {
+              for (let i = 1; i < lastNEntries.length; i++) {
                 const currentChange =
-                  last4Entries[i]?.performance?.percentageChange;
+                  lastNEntries[i]?.performance?.percentageChange;
                 const previousChange =
-                  last4Entries[i - 1]?.performance?.percentageChange;
+                  lastNEntries[i - 1]?.performance?.percentageChange;
 
                 if (
                   currentChange === undefined ||
@@ -6075,8 +6123,8 @@ export class AerodromeService {
                   {
                     percentDeviation,
                     percentageChange,
-                    threshold: -0.41,
-                    last4Changes: last4Entries.map(
+                    threshold: trendingThreshold,
+                    lastNChanges: lastNEntries.map(
                       (entry) => entry?.performance?.percentageChange,
                     ),
                     timestamp: lastHistoryEntry.timestamp,
@@ -6090,8 +6138,8 @@ export class AerodromeService {
                   {
                     percentDeviation,
                     percentageChange,
-                    threshold: -0.41,
-                    last4Changes: last4Entries.map(
+                    threshold: trendingThreshold,
+                    lastNChanges: lastNEntries.map(
                       (entry) => entry?.performance?.percentageChange,
                     ),
                     timestamp: lastHistoryEntry.timestamp,
@@ -6105,7 +6153,7 @@ export class AerodromeService {
                   percentDeviation,
                   percentageChange,
                   historyLength: positionHistory.length,
-                  requiredLength: 4,
+                  requiredLength: historyLengthRequired,
                   timestamp: lastHistoryEntry.timestamp,
                 },
               );
@@ -6116,7 +6164,7 @@ export class AerodromeService {
               {
                 percentDeviation,
                 percentageChange,
-                threshold: -0.5,
+                threshold: standardThreshold,
                 timestamp: lastHistoryEntry.timestamp,
               },
             );
