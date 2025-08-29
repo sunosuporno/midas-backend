@@ -588,7 +588,6 @@ export class AerodromeService {
       value,
     );
   }
-
   private async sendRawTransaction(
     walletLocator: string,
     contractAddress: string,
@@ -1015,7 +1014,6 @@ export class AerodromeService {
 
     return dailyFees;
   }
-
   async mint(createAerodromeLpDto: CreateAerodromeLpDto) {
     let positionId = null;
     let position = null;
@@ -1414,15 +1412,29 @@ export class AerodromeService {
             token0AmountHuman * token0Price * Math.pow(10, this.USDC_DECIMALS),
           );
           // Use the new swapTokens helper
-          const { buyAmount, txResult } = await this.swapTokens(
-            createAerodromeLpDto.walletLocator,
-            this.USDC_ADDRESS,
-            poolConfig.token0,
-            sellAmountUSDC.toString(),
-          );
+          const { buyAmount, quotedBuyAmount, minBuyAmount, txResult } =
+            await this.swapTokens(
+              createAerodromeLpDto.walletLocator,
+              this.USDC_ADDRESS,
+              poolConfig.token0,
+              sellAmountUSDC.toString(),
+            );
           token0SwapResult = txResult;
           token0BuyAmount = buyAmount;
           token0DidSwap = true;
+          // Persist swap analytics for token0 immediately
+          swapResults = {
+            ...swapResults,
+            token0Swap: token0SwapResult
+              ? {
+                  transactionHash: token0SwapResult.transactionHash,
+                  status: token0SwapResult.status,
+                  quotedBuyAmount: quotedBuyAmount || null,
+                  minBuyAmount: minBuyAmount || null,
+                  actualBuyAmount: token0BuyAmount,
+                }
+              : null,
+          };
         } else {
           console.log('Token0 is USDC, no swap needed');
         }
@@ -1441,33 +1453,53 @@ export class AerodromeService {
           const sellAmountUSDC = Math.ceil(
             token1AmountHuman * token1Price * Math.pow(10, this.USDC_DECIMALS),
           );
-          const { buyAmount, txResult } = await this.swapTokens(
-            createAerodromeLpDto.walletLocator,
-            this.USDC_ADDRESS,
-            poolConfig.token1,
-            sellAmountUSDC.toString(),
-          );
+          const { buyAmount, quotedBuyAmount, minBuyAmount, txResult } =
+            await this.swapTokens(
+              createAerodromeLpDto.walletLocator,
+              this.USDC_ADDRESS,
+              poolConfig.token1,
+              sellAmountUSDC.toString(),
+            );
           token1SwapResult = txResult;
           token1BuyAmount = buyAmount;
           token1DidSwap = true;
+          // Persist swap analytics for token1 immediately
+          swapResults = {
+            ...swapResults,
+            token1Swap: token1SwapResult
+              ? {
+                  transactionHash: token1SwapResult.transactionHash,
+                  status: token1SwapResult.status,
+                  quotedBuyAmount: quotedBuyAmount || null,
+                  minBuyAmount: minBuyAmount || null,
+                  actualBuyAmount: token1BuyAmount,
+                }
+              : null,
+          };
         } else {
           console.log('Token1 is USDC, no swap needed');
         }
 
-        // Store swap results for normal mode
+        // Ensure swapResults keys exist even if no swap performed
         swapResults = {
-          token0Swap: token0SwapResult
-            ? {
-                transactionHash: token0SwapResult.transactionHash,
-                status: token0SwapResult.status,
-              }
-            : null,
-          token1Swap: token1SwapResult
-            ? {
-                transactionHash: token1SwapResult.transactionHash,
-                status: token1SwapResult.status,
-              }
-            : null,
+          token0Swap:
+            swapResults && swapResults.token0Swap
+              ? swapResults.token0Swap
+              : token0SwapResult
+                ? {
+                    transactionHash: token0SwapResult.transactionHash,
+                    status: token0SwapResult.status,
+                  }
+                : null,
+          token1Swap:
+            swapResults && swapResults.token1Swap
+              ? swapResults.token1Swap
+              : token1SwapResult
+                ? {
+                    transactionHash: token1SwapResult.transactionHash,
+                    status: token1SwapResult.status,
+                  }
+                : null,
         };
 
         // Set amounts used placeholder; final amounts will be set from approvals below
@@ -2562,7 +2594,6 @@ export class AerodromeService {
       swapResults,
     };
   }
-
   async getTokenPrice(tokenName: string): Promise<number> {
     try {
       console.log('Getting price for token:', tokenName);
@@ -3116,7 +3147,6 @@ export class AerodromeService {
       amount1,
     };
   }
-
   async burn(
     walletLocator: string,
     tokenId: string,
@@ -3739,7 +3769,6 @@ export class AerodromeService {
           ? 'Store token amounts for rebalancing'
           : 'Swap tokens to USDC',
       );
-
       if (isRebalance) {
         // For rebalance: Store token amounts instead of swapping to USDC
         console.log(
@@ -4268,7 +4297,6 @@ export class AerodromeService {
       throw new HttpException(errorMessage, errorStatus);
     }
   }
-
   async collectFees(
     walletLocator: string,
     tokenId: string,
@@ -5037,7 +5065,12 @@ export class AerodromeService {
     sellToken: string,
     buyToken: string,
     sellAmountRaw: string,
-  ): Promise<{ buyAmount: string; txResult: any }> {
+  ): Promise<{
+    buyAmount: string;
+    quotedBuyAmount?: string;
+    minBuyAmount?: string;
+    txResult: any;
+  }> {
     const walletAddress = this.getWalletAddressFromLocator(walletLocator);
     const slippagePercent = 0.3; // Fixed 0.3% slippage
 
@@ -5126,7 +5159,12 @@ export class AerodromeService {
     buyToken: string,
     sellAmountRaw: string,
     walletAddress: string,
-  ): Promise<{ buyAmount: string; txResult: any }> {
+  ): Promise<{
+    buyAmount: string;
+    quotedBuyAmount?: string;
+    minBuyAmount?: string;
+    txResult: any;
+  }> {
     console.log('=== Executing 0x Swap ===');
 
     // Get pre-swap balances
@@ -5239,8 +5277,13 @@ export class AerodromeService {
       console.log('Token transfer confirmed. Swap was successful.');
     }
 
-    // Return the actual buy amount received (buyBalanceChange) instead of the quoted amount
-    return { buyAmount: buyBalanceChange.toString(), txResult };
+    // Return actual buy amount, along with quoted and min expected amounts for slippage analysis
+    return {
+      buyAmount: buyBalanceChange.toString(),
+      quotedBuyAmount: swapQuote.buyAmount,
+      minBuyAmount: swapQuote.minBuyAmount,
+      txResult,
+    };
   }
 
   /**
@@ -5253,7 +5296,12 @@ export class AerodromeService {
     sellAmountRaw: string,
     slippagePercent: number,
     walletAddress: string,
-  ): Promise<{ buyAmount: string; txResult: any }> {
+  ): Promise<{
+    buyAmount: string;
+    quotedBuyAmount?: string;
+    minBuyAmount?: string;
+    txResult: any;
+  }> {
     console.log('=== Executing 1inch Swap ===');
 
     try {
@@ -5335,6 +5383,8 @@ export class AerodromeService {
 
       // Get the actual buy amount from Transfer events
       let buyBalanceChange = BigInt(0);
+      let quotedAmountStrLocal: string | undefined;
+      let minBuyAmountLocal: string | undefined;
 
       if (txResult?.status === 'success') {
         // Wait a bit for the transaction to be processed
@@ -5357,9 +5407,9 @@ export class AerodromeService {
         );
 
         // Verify that we received at least the expected amount
-        const quotedAmount = BigInt(
-          swapResponse.dstAmount || swapResponse.toTokenAmount || '0',
-        );
+        const quotedAmountStr =
+          swapResponse.dstAmount || swapResponse.toTokenAmount || '0';
+        const quotedAmount = BigInt(quotedAmountStr);
 
         // Calculate minimum buy amount by applying slippage tolerance
         // If slippage is 0.3%, we accept 99.7% of the quoted amount
@@ -5369,6 +5419,8 @@ export class AerodromeService {
           BigInt(10000);
 
         const buyAmountCheck = buyBalanceChange >= expectedMinBuyAmount;
+        quotedAmountStrLocal = quotedAmountStr;
+        minBuyAmountLocal = expectedMinBuyAmount.toString();
 
         console.log('Verification results:');
         console.log('Quoted amount:', quotedAmount.toString());
@@ -5488,8 +5540,13 @@ export class AerodromeService {
         console.log('Token transfer confirmed. Swap was successful.');
       }
 
-      // Return the actual buy amount received (buyBalanceChange) instead of the quoted amount
-      return { buyAmount: buyBalanceChange.toString(), txResult };
+      // Return actual buy amount, plus quoted and computed min expected amounts when available
+      return {
+        buyAmount: buyBalanceChange.toString(),
+        quotedBuyAmount: quotedAmountStrLocal,
+        minBuyAmount: minBuyAmountLocal,
+        txResult,
+      };
     } catch (error) {
       console.error('1inch swap failed:', error);
 
@@ -5523,7 +5580,12 @@ export class AerodromeService {
     sellAmountRaw: string,
     slippagePercent: number,
     walletAddress: string,
-  ): Promise<{ buyAmount: string; txResult: any }> {
+  ): Promise<{
+    buyAmount: string;
+    quotedBuyAmount?: string;
+    minBuyAmount?: string;
+    txResult: any;
+  }> {
     console.log('=== Executing Alternative 1inch Swap ===');
 
     // Get pre-swap balances
@@ -5637,7 +5699,7 @@ export class AerodromeService {
       console.log('Token transfer confirmed. Swap was successful.');
     }
 
-    // Return the actual buy amount received (buyBalanceChange) instead of the quoted amount
+    // Return actual amount; quote/min not available in this path
     return { buyAmount: buyBalanceChange.toString(), txResult };
   }
 
@@ -5770,7 +5832,6 @@ export class AerodromeService {
       throw error;
     }
   }
-
   /**
    * Check which positions are out of range (current tick outside position's tick range)
    * This is the highest priority rebalancing condition
@@ -6519,7 +6580,6 @@ export class AerodromeService {
       };
     }
   }
-
   /**
    * Retry failed mints - this is a simplified version for manual testing
    * Note: Immediate retries are now handled in the main mint function
@@ -6961,7 +7021,6 @@ export class AerodromeService {
       };
     }
   }
-
   async getPositionDetails(positionId: string) {
     try {
       console.log(`=== Getting Position Details for ${positionId} ===`);
@@ -7737,7 +7796,6 @@ export class AerodromeService {
   }
 
   // === REBALANCING LOGIC ===
-
   /**
    * Test endpoint to get all positions updated in the last 6 hours and 40 minutes
    * Returns positions ordered from oldest updated to newest updated
