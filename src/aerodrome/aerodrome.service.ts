@@ -6041,7 +6041,7 @@ export class AerodromeService {
               (amount0UnusedValueUSD / usdcAmountValue) * 100;
 
             // Different thresholds for 0.5% vs 1% deviation
-            const unusedThreshold = percentDeviation === 0.5 ? -0.25 : -0.32;
+            const unusedThreshold = percentDeviation === 0.5 ? -0.22 : -0.32;
             const unusedPercentageThreshold =
               percentDeviation === 0.5 ? 15 : 20;
 
@@ -6071,8 +6071,8 @@ export class AerodromeService {
           }
 
           // Different thresholds for 0.5% vs 1% deviation
-          const standardThreshold = percentDeviation === 0.5 ? -0.33 : -0.5;
-          const trendingThreshold = percentDeviation === 0.5 ? -0.28 : -0.41;
+          const standardThreshold = percentDeviation === 0.5 ? -0.28 : -0.5;
+          const trendingThreshold = percentDeviation === 0.5 ? -0.25 : -0.41;
           const historyLengthRequired = percentDeviation === 0.5 ? 3 : 4;
 
           // Check if percentage change is less than threshold
